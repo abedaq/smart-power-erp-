@@ -1,0 +1,150 @@
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800;900&family=IBM+Plex+Sans+Arabic:wght@400;500;600;700;800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #2563EB;
+  --color-success: #059669;
+  --color-background-main: #F8FAFC;
+  --color-background-card: #FFFFFF;
+}
+
+:root {
+  --background: 210 40% 98%;
+  --foreground: 222 47% 11%;
+  --card: 0 0% 100%;
+  --card-foreground: 222 47% 11%;
+  --primary: 221 83% 53%;
+  --primary-foreground: 210 40% 98%;
+  --success: 160 84% 39%;
+  --border: 214 32% 91%;
+}
+
+* {
+  border-color: hsl(var(--border));
+}
+
+body {
+  font-family: 'Cairo', 'IBM Plex Sans Arabic', 'Segoe UI', Tahoma, system-ui, -apple-system, sans-serif;
+  background-color: #F8FAFC;
+  color: #0F172A;
+  font-weight: 600;
+  direction: rtl; /* RTL Support */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "lnum" 1, "zero" 0; /* Force clean lining numerals without center dot */
+}
+
+/* Financial figures and monospaced number styling with clean round zero */
+.font-mono {
+  font-family: 'Cairo', 'IBM Plex Sans Arabic', 'Segoe UI', Tahoma, system-ui, -apple-system, sans-serif !important;
+  font-weight: 700 !important;
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: "lnum" 1, "tnum" 1, "zero" 0;
+  letter-spacing: -0.01em;
+}
+
+/* Custom Scrollbar for Light Mode */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: #F1F5F9;
+  border-radius: 9999px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+  border-radius: 9999px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #94A3B8;
+}
+
+/* ==========================================================================
+   Universal Browser Number Spinners / Steppers Complete Suppression
+   WebKit (Chrome, Safari, Edge, Opera), Gecko (Firefox), and Edge/MS
+   ========================================================================== */
+
+/* 1. WebKit / Blink (Chrome, Edge, Safari iOS & macOS, Opera, Chromium) */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button,
+input::-webkit-outer-spin-button,
+input::-webkit-inner-spin-button {
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  margin: 0 !important;
+  display: none !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* 2. Gecko (Firefox) & Standard CSS Specification */
+input[type="number"] {
+  -moz-appearance: textfield !important;
+  appearance: textfield !important;
+}
+
+/* 3. Microsoft Edge / Trident Clear & Reveal Buttons */
+input[type="number"]::-ms-clear,
+input[type="number"]::-ms-reveal,
+input::-ms-clear,
+input::-ms-reveal {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
+
+/* 4. Utility Classes for Explicit Number Inputs & Grids */
+.no-spinners::-webkit-outer-spin-button,
+.no-spinners::-webkit-inner-spin-button,
+.no-spinner::-webkit-outer-spin-button,
+.no-spinner::-webkit-inner-spin-button {
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  margin: 0 !important;
+  display: none !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+.no-spinners,
+.no-spinner {
+  -moz-appearance: textfield !important;
+  appearance: textfield !important;
+}
+
+/* Enforce English (Latin) numerals across all elements globally */
+*, html, body, input, select, textarea, table, th, td, div, span, button, p, h1, h2, h3, h4, h5, h6 {
+  font-feature-settings: "lnum" 1, "tnum" 1, "zero" 0 !important;
+  font-variant-numeric: lining-nums tabular-nums !important;
+}
+
+/* ==========================================================================
+   Universal Print Styles & Contrast Enforcement
+   ========================================================================== */
+@media print {
+  html, body {
+    background: #ffffff !important;
+    background-color: #ffffff !important;
+    color: #000000 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    box-shadow: none !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .no-print,
+  button:not(.printable-button) {
+    display: none !important;
+  }
+
+  .page-break {
+    page-break-after: always !important;
+    break-after: page !important;
+  }
+}
+
+
+

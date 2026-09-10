@@ -1,0 +1,176 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Background Canvas -->
+    <rect id="bg" width="512" height="512" fill="#FFFFFF" />
+
+    <!-- Ambient Shadow Filter -->
+    <filter id="soft-shadow" x="-30%" y="-20%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="28" stdDeviation="24" flood-color="#D95700" flood-opacity="0.28" />
+      <feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#4A1800" flood-opacity="0.18" />
+    </filter>
+
+    <!-- Side Extrusion Shadow Filter -->
+    <filter id="depth-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="4" />
+      <feOffset dx="-2" dy="4" result="offsetblur" />
+      <feComponentTransfer>
+        <feFuncA type="linear" slope="0.35" />
+      </feComponentTransfer>
+      <feMerge>
+        <feMergeNode />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <!-- Gradients -->
+    <!-- 3D Base/Extrusion Dark Orange -->
+    <linearGradient id="extrusion-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF6B00" />
+      <stop offset="50%" stop-color="#D94000" />
+      <stop offset="100%" stop-color="#8F1D00" />
+    </linearGradient>
+
+    <!-- Main Front Face (Light Side) -->
+    <linearGradient id="front-left-grad" x1="20%" y1="0%" x2="80%" y2="100%">
+      <stop offset="0%" stop-color="#FFF96C" />
+      <stop offset="35%" stop-color="#FFD600" />
+      <stop offset="85%" stop-color="#FF8800" />
+      <stop offset="100%" stop-color="#F35A00" />
+    </linearGradient>
+
+    <!-- Main Front Face (Shaded Side for 3D Chisel Effect) -->
+    <linearGradient id="front-right-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFE600" />
+      <stop offset="40%" stop-color="#FF9F00" />
+      <stop offset="100%" stop-color="#DD4800" />
+    </linearGradient>
+
+    <!-- Top Bevel Gloss Highlight -->
+    <linearGradient id="highlight-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.85" />
+      <stop offset="50%" stop-color="#FFF4A3" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#FFAE00" stop-opacity="0" />
+    </linearGradient>
+
+    <!-- Core Dynamic Glow -->
+    <radialGradient id="energy-glow" cx="45%" cy="40%" r="50%">
+      <stop offset="0%" stop-color="#FFFDE0" stop-opacity="0.9" />
+      <stop offset="45%" stop-color="#FFD200" stop-opacity="0.4" />
+      <stop offset="100%" stop-color="#FF6600" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Rim Light Gradient -->
+    <linearGradient id="rim-light" x1="0%" y1="0%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.9" />
+      <stop offset="60%" stop-color="#FFE600" stop-opacity="0.4" />
+      <stop offset="100%" stop-color="#FF7700" stop-opacity="0" />
+    </linearGradient>
+
+    <!-- Glass Surface Specular Reflection -->
+    <linearGradient id="glass-reflection" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.5" />
+      <stop offset="30%" stop-color="#FFFFFF" stop-opacity="0.05" />
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0" />
+    </linearGradient>
+  </defs>
+
+  <!-- Pure Clean Background -->
+  <rect width="512" height="512" rx="115" fill="#FFFFFF" />
+
+  <!-- Ambient Under-Glow -->
+  <circle cx="256" cy="256" r="150" fill="url(#energy-glow)" filter="blur(20px)" opacity="0.65" />
+
+  <!-- Main 3D Icon Container -->
+  <g filter="url(#soft-shadow)">
+
+    <!-- Bottom 3D Extrusion Layer (Thickness & Depth) -->
+    <g id="extrusion" fill="url(#extrusion-grad)">
+      <!-- Extrusion Walls -->
+      <path d="M 284 56 L 300 72 L 202 246 L 278 246 L 194 456 L 210 440 L 294 230 L 218 230 Z" opacity="0.4" />
+      <path d="M 186 246 L 196 270 L 232 468 L 222 444 Z" />
+      <path d="M 222 444 L 232 468 L 348 248 L 338 224 Z" />
+      <path d="M 338 224 L 348 248 L 278 248 L 268 224 Z" />
+      <path d="M 268 224 L 278 248 L 300 72 L 290 48 Z" />
+    </g>
+
+    <!-- 3D Lower Underbody Body Solid -->
+    <path d="M 290 62 
+             L 186 238 
+             A 6 6 0 0 0 191 247 
+             L 267 247 
+             L 217 448 
+             A 5 5 0 0 0 226 452 
+             L 342 232 
+             A 6 6 0 0 0 337 223 
+             L 261 223 
+             L 299 57 
+             A 5 5 0 0 0 290 52 Z"
+          fill="url(#extrusion-grad)"
+          transform="translate(0, 16)" />
+
+    <!-- Bolt Front Face Base (Left Bevel) -->
+    <path id="front-face-left" 
+          d="M 295 56
+             L 186 238
+             A 4 4 0 0 0 189 244
+             L 265 244
+             L 221 445
+             L 262 234
+             Z" 
+          fill="url(#front-left-grad)" />
+
+    <!-- Bolt Front Face Base (Right Bevel - Creates Chiseled 3D Center Spine) -->
+    <path id="front-face-right" 
+          d="M 295 56
+             L 262 234
+             L 221 445
+             A 3 3 0 0 0 226 448
+             L 338 228
+             A 4 4 0 0 0 335 222
+             L 259 222
+             L 297 54
+             A 3 3 0 0 0 295 56 Z" 
+          fill="url(#front-right-grad)" />
+
+    <!-- Front Surface High-Gloss Overlay (Light Reflection) -->
+    <path d="M 295 56 
+             L 186 238 
+             A 4 4 0 0 0 189 244 
+             L 265 244 
+             L 248 320 
+             L 290 190 
+             L 240 190 
+             L 285 70 Z" 
+          fill="url(#highlight-grad)" 
+          opacity="0.85" />
+
+    <!-- Top Left Rim Glow Edge -->
+    <path d="M 295 56 L 186 238" 
+          stroke="url(#rim-light)" 
+          stroke-width="3.5" 
+          stroke-linecap="round" 
+          fill="none" />
+
+    <!-- Inner Spine Specular Highlight -->
+    <path d="M 292 64 L 263 234 L 223 440" 
+          stroke="#FFFFFF" 
+          stroke-width="2" 
+          stroke-linecap="round" 
+          stroke-opacity="0.6" 
+          fill="none" 
+          filter="blur(0.5px)" />
+
+    <!-- Subtle Diagonal Glass Sheen Strip -->
+    <path d="M 220 140 L 285 70 L 270 160 L 205 230 Z" 
+          fill="url(#glass-reflection)" 
+          transform="rotate(-10 256 256)" 
+          opacity="0.7" />
+
+  </g>
+
+  <!-- Dynamic Spark Gleams (Minimal Modern Detailing) -->
+  <circle cx="342" cy="216" r="3" fill="#FFFFFF" opacity="0.9" filter="drop-shadow(0 0 4px #FFD700)" />
+  <circle cx="180" cy="246" r="2.5" fill="#FFFFFF" opacity="0.8" filter="drop-shadow(0 0 3px #FFD700)" />
+  <circle cx="218" cy="452" r="2" fill="#FFF6C2" opacity="0.9" filter="drop-shadow(0 0 4px #FF9000)" />
+  <circle cx="298" cy="52" r="2" fill="#FFFFFF" opacity="0.9" filter="drop-shadow(0 0 3px #FFF)" />
+</svg>

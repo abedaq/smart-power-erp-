@@ -1,0 +1,42 @@
+# Binaries & Distributions
+dist_portable/
+pgsql/
+*.exe
+*.apk
+*.dll
+*.iso
+*.dmg
+
+# Database Local Clusters & Backups
+data_template/
+backups/
+*.backup
+*.dump
+*.log
+
+# Node & Frontend
+node_modules/
+dist/
+.vite/
+npm-debug.log*
+
+# Go Server
+server/SmartPowerERP.exe
+server/bin/
+server/tmp/
+
+# Flutter & Android
+smartpower_license_admin/build/
+smartpower_license_admin/.dart_tool/
+smartpower_license_admin/.flutter-plugins
+smartpower_license_admin/.flutter-plugins-dependencies
+smartpower_license_admin/android/.gradle/
+smartpower_license_admin/android/local.properties
+.gradle/
+.idea/
+.vscode/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
