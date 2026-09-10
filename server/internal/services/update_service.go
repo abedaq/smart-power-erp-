@@ -32,7 +32,7 @@ var (
 
 const (
 	// DefaultAppVersion represents current release version of SmartPower ERP
-	DefaultAppVersion = "3.4.3.2"
+	DefaultAppVersion = "3.4.3.3"
 	// DefaultManifestURL fallback remote version metadata endpoint
 	DefaultManifestURL = "https://pkuoytiickgbtfeffmxq.supabase.co/storage/v1/object/public/updates/version.json"
 )
@@ -504,12 +504,20 @@ $targetExe = '%s'
 $backupExe = '%s'
 $newExe    = '%s'
 
-# 1. Wait for current running application process to terminate cleanly
+# 1. Wait up to 3 seconds for current running process to terminate cleanly, then force kill
 try {
     $proc = Get-Process -Id $pidToWait -ErrorAction SilentlyContinue
     if ($proc) {
-        $proc.WaitForExit(30000)
+        $proc.WaitForExit(3000)
+        if (-not $proc.HasExited) {
+            Stop-Process -Id $pidToWait -Force -ErrorAction SilentlyContinue
+        }
     }
+} catch { }
+
+# Extra safety: Ensure no leftover SmartPowerERP instance is holding the binary or port 3000
+try {
+    Get-Process -Name 'SmartPowerERP' -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $PID } | Stop-Process -Force -ErrorAction SilentlyContinue
 } catch { }
 
 # Safety delay ensuring file handles are fully released
@@ -526,12 +534,18 @@ try {
     $retries = 15
     while ($retries -gt 0) {
         try {
-            Copy-Item -Path $newExe -Destination $targetExe -Force
+            [System.IO.File]::Copy($newExe, $targetExe, $true)
             $success = $true
             break
         } catch {
-            $retries--
-            Start-Sleep -Milliseconds 500
+            try {
+                Copy-Item -Path $newExe -Destination $targetExe -Force
+                $success = $true
+                break
+            } catch {
+                $retries--
+                Start-Sleep -Milliseconds 500
+            }
         }
     }
 
@@ -556,6 +570,9 @@ catch {
     } catch { }
 }
 finally {
+    # Safety delay ensuring port 3000 and DB connections are completely freed
+    Start-Sleep -Milliseconds 1500
+
     # 5. Mandatory De-elevation to Standard User Token with explicit working directory (Prevents PostgreSQL admin crash)
     $workDir = Split-Path -Path $targetExe -Parent
     try {
@@ -632,18 +649,20 @@ finally {
 	s.mu.Unlock()
 	s.emitProgressEvent()
 
-	// Initiate graceful application shutdown
+	// Initiate graceful application shutdown with guaranteed termination
 	s.mu.RLock()
 	shutdownFn := s.shutdownFn
 	s.mu.RUnlock()
 
-	if shutdownFn != nil {
-		go func() {
-			time.Sleep(300 * time.Millisecond)
-			log.Println("🛑 Application is terminating to allow atomic binary replacement...")
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		log.Println("🛑 Application is terminating to allow atomic binary replacement...")
+		if shutdownFn != nil {
 			shutdownFn()
-		}()
-	}
+		}
+		time.Sleep(500 * time.Millisecond)
+		os.Exit(0)
+	}()
 
 	return nil
 }
