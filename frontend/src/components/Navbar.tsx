@@ -68,8 +68,8 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, isSidebarCollapsed }) 
           <span className="text-xs font-bold text-slate-500">مرحباً بك،</span>
           <h2 className="text-base font-black text-slate-900">{user?.full_name || 'المستخدم'}</h2>
           {getRoleBadge(user?.role)}
-          <div className="hidden md:flex items-center gap-1.5 bg-gradient-to-r from-cyan-600 to-blue-600 text-white px-2.5 py-1 rounded-xl text-xs font-black shadow-sm">
-            <span>🚀 إصدار السحاب v1.0.7 - النواة المحدثة هوائياً بنجاح تام ⚡</span>
+          <div className="hidden md:flex items-center gap-1.5 bg-gradient-to-r from-amber-500 via-yellow-500 to-orange-500 text-slate-950 px-2.5 py-1 rounded-xl text-xs font-black shadow-sm">
+            <span>⚡ إصدار السحاب v1.0.8 - تم التنظيف الشامل وتحديث الشاشة المالية باللون الأصفر</span>
           </div>
         </div>
       </div>

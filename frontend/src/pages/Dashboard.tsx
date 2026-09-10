@@ -123,8 +123,11 @@ const Dashboard: React.FC = () => {
               <BarChart3 size={24} />
             </span>
             <div>
-              <h1 className="text-2xl font-black text-slate-900 tracking-tight">
-                شاشة التحصيل الشهري والمتابعة المالية
+              <h1 className="text-2xl font-black text-yellow-500 tracking-tight flex items-center gap-2">
+                <span>شاشة التحصيل الشهري والمتابعة المالية</span>
+                <span className="text-xs bg-yellow-400/20 text-yellow-600 border border-yellow-400/40 px-2 py-0.5 rounded-lg font-bold">
+                  محدثة ⚡
+                </span>
               </h1>
               <p className="text-slate-500 text-xs sm:text-sm font-medium mt-0.5">
                 متابعة حركة المديونيات والمبالغ المحصلة ونسب التحصيل لجميع الدورات المحاسبية
