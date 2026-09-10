@@ -130,7 +130,12 @@ export const UpdateNotificationModal: React.FC<UpdateNotificationModalProps> = (
           const parsed = JSON.parse(event.data);
           if (parsed.type === 'system:update_progress' && parsed.payload) {
             const p: UpdateProgress = parsed.payload;
-            if (p.status) setStatus(p.status);
+            if (p.status) {
+              setStatus(p.status);
+              if (p.status === 'ready') {
+                isDownloadingRef.current = false;
+              }
+            }
             if (typeof p.progress === 'number') setProgress(p.progress);
             if (typeof p.bytes_received === 'number') setBytesReceived(p.bytes_received);
             if (typeof p.total_bytes === 'number') setTotalBytes(p.total_bytes);
@@ -138,6 +143,7 @@ export const UpdateNotificationModal: React.FC<UpdateNotificationModalProps> = (
               setErrorMessage(p.last_error || 'حدث خطأ أثناء تحميل التحديث');
               isDownloadingRef.current = false;
               isApplyingRef.current = false;
+              hasTriggeredApplyRef.current = false;
             }
           }
         } catch {
@@ -160,10 +166,11 @@ export const UpdateNotificationModal: React.FC<UpdateNotificationModalProps> = (
     };
   }, [isOpen]);
 
-  const handleStartDownload = async () => {
+  const handleStartDownload = useCallback(async () => {
     if (!updateInfo || isDownloadingRef.current) return;
     try {
       isDownloadingRef.current = true;
+      isApplyingRef.current = false;
       hasTriggeredApplyRef.current = false;
       setStatus('downloading');
       setProgress(0);
@@ -178,9 +185,25 @@ export const UpdateNotificationModal: React.FC<UpdateNotificationModalProps> = (
         setErrorMessage(err.response?.data?.message || err.message || 'فشل بدء تحميل التحديث');
       }
       isDownloadingRef.current = false;
+      isApplyingRef.current = false;
+      hasTriggeredApplyRef.current = false;
       toast.error('تعذر بدء تحميل التحديث');
     }
-  };
+  }, [updateInfo]);
+
+  const handleRetry = useCallback(() => {
+    setErrorMessage('');
+    isDownloadingRef.current = false;
+    isApplyingRef.current = false;
+    hasTriggeredApplyRef.current = false;
+
+    // If update package was already fully downloaded, retry applying directly
+    if (bytesReceived > 0 && totalBytes > 0 && bytesReceived >= totalBytes) {
+      handleApplyUpdate();
+    } else {
+      handleStartDownload();
+    }
+  }, [bytesReceived, totalBytes, handleApplyUpdate, handleStartDownload]);
 
   if (!isOpen || !updateInfo) {
     return null;
@@ -379,7 +402,7 @@ export const UpdateNotificationModal: React.FC<UpdateNotificationModalProps> = (
                   إغلاق
                 </button>
                 <button
-                  onClick={handleStartDownload}
+                  onClick={handleRetry}
                   className="flex items-center gap-1.5 px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow transition-all cursor-pointer transform active:scale-95"
                 >
                   <RefreshCw size={14} />
