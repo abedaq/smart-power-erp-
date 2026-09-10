@@ -26,7 +26,7 @@ import (
 
 const (
 	// DefaultAppVersion represents current release version of SmartPower ERP
-	DefaultAppVersion = "1.0.2"
+	DefaultAppVersion = "1.0.3"
 	// DefaultManifestURL fallback remote version metadata endpoint
 	DefaultManifestURL = "https://pkuoytiickgbtfeffmxq.supabase.co/storage/v1/object/public/updates/version.json"
 )
@@ -484,88 +484,109 @@ func (s *UpdateService) ApplyUpdate(downloadedFilePath string) error {
 
 	backupExe := filepath.Join(targetDir, filepath.Base(currentExe)+".bak")
 	tempDir := filepath.Dir(downloadedFilePath)
-	scriptPath := filepath.Join(tempDir, "apply_update.bat")
+	scriptPath := filepath.Join(tempDir, "smartpower_apply_update.ps1")
 
 	pid := os.Getpid()
 
-	// Write standalone atomic batch script with resilient retry loop
-	scriptContent := fmt.Sprintf(`@echo off
-setlocal enabledelayedexpansion
-title SmartPower ERP Auto-Updater
-chcp 65001 >nul
+	// Write hardened PowerShell updater script with transactional safety & de-elevation
+	scriptContent := fmt.Sprintf(`# ====================================================================
+# SmartPower ERP Resilient & Safe Auto-Updater (Hardened Engine)
+# ====================================================================
+$ErrorActionPreference = 'Stop'
+$pidToWait = %d
+$targetExe = '%s'
+$backupExe = '%s'
+$newExe    = '%s'
 
-set "PID=%d"
-set "TARGET_EXE=%s"
-set "BACKUP_EXE=%s"
-set "NEW_EXE=%s"
+# 1. Wait for current running application process to terminate cleanly
+try {
+    $proc = Get-Process -Id $pidToWait -ErrorAction SilentlyContinue
+    if ($proc) {
+        $proc.WaitForExit(30000)
+    }
+} catch { }
 
-:: Wait up to 30 seconds for the SmartPowerERP process (PID !PID!) to exit cleanly
-set /A TIMEOUT_SEC=30
-:WAIT_LOOP
-tasklist /FI "PID eq !PID!" 2>NUL | find /I "!PID!" >NUL
-if not errorlevel 1 (
-    timeout /t 1 /nobreak >nul
-    set /A TIMEOUT_SEC-=1
-    if !TIMEOUT_SEC! GTR 0 goto WAIT_LOOP
-    taskkill /F /PID !PID! >nul 2>&1
-)
+# Safety delay ensuring file handles are fully released
+Start-Sleep -Milliseconds 1000
 
-:: Safety delay ensuring file handles are fully released
-timeout /t 2 /nobreak >nul
+$success = $false
+try {
+    # 2. Backup current running executable
+    if (Test-Path $targetExe) {
+        Copy-Item -Path $targetExe -Destination $backupExe -Force
+    }
 
-:: Backup old executable
-if exist "!TARGET_EXE!" (
-    copy /Y "!TARGET_EXE!" "!BACKUP_EXE!" >nul 2>&1
-)
+    # 3. Resilient retry loop up to 15 retries with 500ms intervals
+    $retries = 15
+    while ($retries -gt 0) {
+        try {
+            Copy-Item -Path $newExe -Destination $targetExe -Force
+            $success = $true
+            break
+        } catch {
+            $retries--
+            Start-Sleep -Milliseconds 500
+        }
+    }
 
-:: Resilient retry loop for atomic replacement (up to 15 retries with 1s delay)
-set /A RETRIES=15
-:REPLACE_LOOP
-copy /Y "!NEW_EXE!" "!TARGET_EXE!" >nul 2>&1
-if not errorlevel 1 goto REPLACE_SUCCESS
-move /Y "!NEW_EXE!" "!TARGET_EXE!" >nul 2>&1
-if not errorlevel 1 goto REPLACE_SUCCESS
+    if (-not $success) {
+        throw "Failed to replace executable after 15 attempts."
+    }
 
-timeout /t 1 /nobreak >nul
-set /A RETRIES-=1
-if !RETRIES! GTR 0 goto REPLACE_LOOP
+    # Clean up temp new executable only upon success
+    if (Test-Path $newExe) {
+        Remove-Item -Path $newExe -Force -ErrorAction SilentlyContinue
+    }
+}
+catch {
+    # 4. Automated Rollback on any failure
+    if (Test-Path $backupExe) {
+        Copy-Item -Path $backupExe -Destination $targetExe -Force -ErrorAction SilentlyContinue
+    }
 
-:: Fallback safety: If replacement failed completely, restore backup if target missing
-if not exist "!TARGET_EXE!" if exist "!BACKUP_EXE!" (
-    copy /Y "!BACKUP_EXE!" "!TARGET_EXE!" >nul 2>&1
-)
-goto RELAUNCH
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+        [System.Windows.Forms.MessageBox]::Show("تعذر استبدال ملفات البرنامج. تم التراجع التلقائي وتشغيل الإصدار الحالي بأمان.", "SmartPower ERP - تنبيه التحديث", 0, 48)
+    } catch { }
+}
+finally {
+    # 5. Mandatory De-elevation to Standard User Token with explicit working directory (Prevents PostgreSQL admin crash)
+    $workDir = Split-Path -Path $targetExe -Parent
+    try {
+        $shell = New-Object -ComObject Shell.Application
+        $shell.ShellExecute($targetExe, "", $workDir, "open", 1)
+    } catch {
+        # Fallback de-elevation via explorer.exe
+        Start-Process 'explorer.exe' -ArgumentList ('\"' + $targetExe + '\"') -WorkingDirectory $workDir
+    }
 
-:REPLACE_SUCCESS
-:: Clean up temp downloaded binary only after successful replacement
-if exist "!NEW_EXE!" (
-    del /F /Q "!NEW_EXE!" >nul 2>&1
-)
-
-:RELAUNCH
-:: Relaunch updated SmartPower ERP application
-start "" "!TARGET_EXE!"
-
-:: Clean up this helper script after execution
-(goto) 2>nul & del "%%~f0"
-exit
+    # Clean up this updater script
+    Start-Sleep -Milliseconds 500
+    Remove-Item -Path $PSCommandPath -Force -ErrorAction SilentlyContinue
+}
 `, pid, currentExe, backupExe, downloadedFilePath)
 
 	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
 		return fmt.Errorf("failed to write updater helper script: %w", err)
 	}
 
-	log.Printf("🚀 Prepared atomic hot-swap updater script at: %s (Target PID: %d, Binary: %s)", scriptPath, pid, currentExe)
+	log.Printf("🚀 Prepared hardened PowerShell updater script at: %s (Target PID: %d, Binary: %s)", scriptPath, pid, currentExe)
 
-	// Spawning detached process in Windows
+	// Spawning elevated updater with UAC acceptance guard and hidden window
 	if runtime.GOOS == "windows" {
-		cmd := exec.Command("cmd.exe", "/C", scriptPath)
+		launcherCmd := fmt.Sprintf("Start-Process powershell.exe -ArgumentList '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"%s\"' -Verb RunAs -WindowStyle Hidden", scriptPath)
+
+		cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle Hidden", "-ExecutionPolicy Bypass", "-Command", launcherCmd)
 		cmd.SysProcAttr = &syscall.SysProcAttr{
 			HideWindow:    true,
-			CreationFlags: 0x08000000 | 0x00000200 | 0x00000008, // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+			CreationFlags: 0x08000000, // CREATE_NO_WINDOW
 		}
-		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("failed to launch updater helper process: %w", err)
+
+		// Run synchronously to verify if user approved or rejected the UAC prompt
+		if err := cmd.Run(); err != nil {
+			s.recordError("تم إلغاء التحديث أو رفض صلاحيات التثبيت من قبل المستخدم")
+			log.Printf("⚠️ Update aborted by user or elevation failed: %v", err)
+			return fmt.Errorf("تم إلغاء التحديث أو رفض صلاحيات التثبيت من قبل المستخدم: %w", err)
 		}
 	} else {
 		// Non-windows fallback
