@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -294,7 +295,25 @@ func (s *UpdateService) DownloadUpdate(ctx context.Context, downloadURL string, 
 	}
 	req.Header.Set("User-Agent", fmt.Sprintf("SmartPowerERP/%s", s.GetCurrentVersion()))
 
-	resp, err := s.httpClient.Do(req)
+	downloadTransport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   15 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	downloadClient := &http.Client{
+		Timeout:   0, // Unlimited duration for large binary downloads
+		Transport: downloadTransport,
+	}
+
+	resp, err := downloadClient.Do(req)
 	if err != nil {
 		s.recordError(fmt.Sprintf("download request failed: %v", err))
 		return "", err
