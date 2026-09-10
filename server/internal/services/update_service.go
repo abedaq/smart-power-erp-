@@ -32,7 +32,7 @@ var (
 
 const (
 	// DefaultAppVersion represents current release version of SmartPower ERP
-	DefaultAppVersion = "3.4.3.3"
+	DefaultAppVersion = "3.4.3.4"
 	// DefaultManifestURL fallback remote version metadata endpoint
 	DefaultManifestURL = "https://pkuoytiickgbtfeffmxq.supabase.co/storage/v1/object/public/updates/version.json"
 )
