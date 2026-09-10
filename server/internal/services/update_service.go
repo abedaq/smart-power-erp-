@@ -20,13 +20,19 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"smartpower/internal/config"
 )
 
+var (
+	shell32           = syscall.NewLazyDLL("shell32.dll")
+	procShellExecuteW = shell32.NewProc("ShellExecuteW")
+)
+
 const (
 	// DefaultAppVersion represents current release version of SmartPower ERP
-	DefaultAppVersion = "1.0.4"
+	DefaultAppVersion = "1.0.5"
 	// DefaultManifestURL fallback remote version metadata endpoint
 	DefaultManifestURL = "https://pkuoytiickgbtfeffmxq.supabase.co/storage/v1/object/public/updates/version.json"
 )
@@ -572,22 +578,47 @@ finally {
 
 	log.Printf("🚀 Prepared hardened PowerShell updater script at: %s (Target PID: %d, Binary: %s)", scriptPath, pid, currentExe)
 
-	// Spawning elevated updater with UAC acceptance guard and hidden window
+	// Spawning elevated updater with native Windows ShellExecuteW
 	if runtime.GOOS == "windows" {
-		launcherCmd := fmt.Sprintf("Start-Process powershell.exe -ArgumentList '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"%s\"' -Verb RunAs -WindowStyle Hidden", scriptPath)
-
-		cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle Hidden", "-ExecutionPolicy Bypass", "-Command", launcherCmd)
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			HideWindow:    true,
-			CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+		verbPtr, err := syscall.UTF16PtrFromString("runas")
+		if err != nil {
+			return fmt.Errorf("failed to encode verb: %w", err)
+		}
+		exePtr, err := syscall.UTF16PtrFromString("powershell.exe")
+		if err != nil {
+			return fmt.Errorf("failed to encode exe: %w", err)
+		}
+		argsStr := fmt.Sprintf("-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"%s\"", scriptPath)
+		argsPtr, err := syscall.UTF16PtrFromString(argsStr)
+		if err != nil {
+			return fmt.Errorf("failed to encode args: %w", err)
+		}
+		dirPtr, err := syscall.UTF16PtrFromString(filepath.Dir(scriptPath))
+		if err != nil {
+			return fmt.Errorf("failed to encode dir: %w", err)
 		}
 
-		// Run synchronously to verify if user approved or rejected the UAC prompt
-		if err := cmd.Run(); err != nil {
-			s.recordError("تم إلغاء التحديث أو رفض صلاحيات التثبيت من قبل المستخدم")
-			log.Printf("⚠️ Update aborted by user or elevation failed: %v", err)
-			return fmt.Errorf("تم إلغاء التحديث أو رفض صلاحيات التثبيت من قبل المستخدم: %w", err)
+		// SW_HIDE = 0
+		ret, _, _ := procShellExecuteW.Call(
+			0,
+			uintptr(unsafe.Pointer(verbPtr)),
+			uintptr(unsafe.Pointer(exePtr)),
+			uintptr(unsafe.Pointer(argsPtr)),
+			uintptr(unsafe.Pointer(dirPtr)),
+			uintptr(0), // SW_HIDE
+		)
+
+		if ret <= 32 {
+			if ret == 5 {
+				s.recordError("تم إلغاء نافذة تأكيد الصلاحيات (UAC) من قبل المستخدم")
+				log.Printf("⚠️ Update cancelled: User declined UAC prompt (Error 5)")
+				return fmt.Errorf("تم إلغاء نافذة تأكيد الصلاحيات (UAC) من قبل المستخدم")
+			}
+			s.recordError(fmt.Sprintf("فشل إطلاق عملية التحديث المرتفعة (كود الخطأ: %d)", ret))
+			log.Printf("❌ ShellExecuteW failed with code %d", ret)
+			return fmt.Errorf("فشل إطلاق عملية التحديث المرتفعة (كود الخطأ: %d)", ret)
 		}
+		log.Printf("✅ ShellExecuteW launched successfully with code %d. User accepted UAC.", ret)
 	} else {
 		// Non-windows fallback
 		cmd := exec.Command("sh", "-c", fmt.Sprintf("sleep 2 && cp '%s' '%s' && rm -f '%s'", downloadedFilePath, currentExe, downloadedFilePath))
