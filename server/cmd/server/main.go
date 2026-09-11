@@ -6,6 +6,7 @@ import (
 	"log"
 	"mime"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -279,6 +280,26 @@ func showFatalMessageBox(title, message string) {
 	}
 }
 
+func cleanupOldBinaries() {
+	execPath, err := os.Executable()
+	if err != nil {
+		return
+	}
+	appDir := filepath.Dir(execPath)
+	entries, err := os.ReadDir(appDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), ".old") {
+			oldPath := filepath.Join(appDir, entry.Name())
+			if err := os.Remove(oldPath); err == nil {
+				log.Printf("🧹 Cleaned up legacy update binary: %s", oldPath)
+			}
+		}
+	}
+}
+
 var shutdownOnce sync.Once
 
 func main() {
@@ -303,6 +324,9 @@ func main() {
 	if logFile != nil {
 		defer logFile.Close()
 	}
+
+	// 0.1 Clean up legacy .old binaries from previous atomic updates
+	cleanupOldBinaries()
 
 	log.Println("==================================================")
 	log.Println("🚀 SmartPower Utility ERP - Standalone Go Engine")
@@ -470,6 +494,7 @@ func main() {
 	api.Get("/system/update-status", h.GetUpdateStatus)
 	api.Post("/system/download-update", h.DownloadUpdate)
 	api.Post("/system/apply-update", h.ApplyUpdate)
+	api.Post("/system/update-ui", middleware.AuthRequired(authService), h.UpdateUI)
 
 	// Cloud Sync endpoints
 	api.Get("/system/sync-status", func(c *fiber.Ctx) error {
@@ -603,7 +628,22 @@ func main() {
 	// Backup trigger
 	api.Post("/backup/now", middleware.AuthRequired(authService), h.TriggerBackup)
 
-	// 8. Serve Embedded Frontend Distribution in-memory with strict MIME enforcement
+	// 8. Dynamic UI Overlay & Embedded Frontend Distribution
+	localAppData := os.Getenv("LOCALAPPDATA")
+	if localAppData == "" {
+		localAppData = os.Getenv("APPDATA")
+	}
+	customUIDist := ""
+	if localAppData != "" {
+		candidate := filepath.Join(localAppData, "SmartPowerERP", "custom_ui", "dist")
+		if fi, err := os.Stat(candidate); err == nil && fi.IsDir() {
+			if _, err := os.Stat(filepath.Join(candidate, "index.html")); err == nil {
+				customUIDist = candidate
+				log.Printf("🎨 Dynamic Custom UI Overlay active: %s", customUIDist)
+			}
+		}
+	}
+
 	embeddedFS := ui.GetFS()
 
 	// Direct handler for /assets/* guaranteeing correct MIME types and preventing HTML fallback
@@ -612,15 +652,30 @@ func main() {
 		if idx := strings.Index(filePath, "assets/"); idx != -1 {
 			filePath = filePath[idx:]
 		}
-		fileData, err := embeddedFS.Open(filePath)
-		if err != nil {
-			return c.Status(fiber.StatusNotFound).SendString("Asset not found")
-		}
-		defer fileData.Close()
 
-		content, err := io.ReadAll(fileData)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).SendString("Error reading asset")
+		var content []byte
+		var err error
+
+		// 1. Check custom UI dist on disk first
+		if customUIDist != "" {
+			diskAsset := filepath.Join(customUIDist, filePath)
+			if fi, sErr := os.Stat(diskAsset); sErr == nil && !fi.IsDir() {
+				content, err = os.ReadFile(diskAsset)
+			}
+		}
+
+		// 2. Fallback to embedded filesystem
+		if content == nil {
+			fileData, fErr := embeddedFS.Open(filePath)
+			if fErr != nil {
+				return c.Status(fiber.StatusNotFound).SendString("Asset not found")
+			}
+			defer fileData.Close()
+
+			content, err = io.ReadAll(fileData)
+			if err != nil {
+				return c.Status(fiber.StatusInternalServerError).SendString("Error reading asset")
+			}
 		}
 
 		p := strings.ToLower(filePath)
@@ -632,6 +687,10 @@ func main() {
 			c.Set("Content-Type", "image/svg+xml")
 		} else if strings.HasSuffix(p, ".woff2") {
 			c.Set("Content-Type", "font/woff2")
+		} else if strings.HasSuffix(p, ".woff") {
+			c.Set("Content-Type", "font/woff")
+		} else if strings.HasSuffix(p, ".ttf") {
+			c.Set("Content-Type", "font/ttf")
 		} else if strings.HasSuffix(p, ".png") {
 			c.Set("Content-Type", "image/png")
 		} else if strings.HasSuffix(p, ".ico") {
@@ -642,12 +701,21 @@ func main() {
 		return c.Send(content)
 	})
 
-	app.Use("/", filesystem.New(filesystem.Config{
-		Root:         embeddedFS,
-		Index:        "index.html",
-		NotFoundFile: "index.html", // SPA client-side router fallback
-		MaxAge:       3600,
-	}))
+	if customUIDist != "" {
+		app.Use("/", filesystem.New(filesystem.Config{
+			Root:         http.Dir(customUIDist),
+			Index:        "index.html",
+			NotFoundFile: "index.html",
+			MaxAge:       3600,
+		}))
+	} else {
+		app.Use("/", filesystem.New(filesystem.Config{
+			Root:         embeddedFS,
+			Index:        "index.html",
+			NotFoundFile: "index.html", // SPA client-side router fallback
+			MaxAge:       3600,
+		}))
+	}
 
 
 	// 9. Schedule Automatic Backup Ticker (Every 10 Minutes)
@@ -664,13 +732,10 @@ func main() {
 		}
 	})
 
-	// 10. Auto-open native webview window on start and track window lifecycle
+	// 10. Auto-open native webview window on start
 	SafeGo("NativeWindowLauncher", func() {
 		time.Sleep(800 * time.Millisecond)
-		openNativeWindow(fmt.Sprintf("http://localhost:%s", cfg.Port), func() {
-			log.Println("🛑 Application UI window closed. Exiting server backend...")
-			doShutdown()
-		})
+		openNativeWindow(fmt.Sprintf("http://localhost:%s", cfg.Port), nil)
 	})
 
 	// 11. Graceful Shutdown Signal Interceptor
@@ -805,25 +870,14 @@ func openNativeWindow(url string, onWindowClose func()) {
 				"--no-default-browser-check",
 			)
 			if err := cmd.Start(); err == nil {
-				log.Printf("🖥️ Launched fallback application window via: %s", filepath.Base(browserPath))
-				SafeGo("WindowProcessWatcher", func() {
-					_ = cmd.Wait()
-					log.Println("🛑 Fallback window process terminated by user. Initiating backend shutdown...")
-					if onWindowClose != nil {
-						onWindowClose()
-					}
-				})
+				log.Printf("🖥️ Launched application window via: %s (%s)", filepath.Base(browserPath), url)
 				return
 			}
 		}
 
-		// Fatal Error if no webview or modern browser is available (prevents untracked zombie processes)
-		errMsg := "يتطلب تشغيل النظام وجود Microsoft Edge WebView2 Runtime أو متصفح حديث (Microsoft Edge / Google Chrome).\n\nيرجى تثبيت Microsoft Edge WebView2 Runtime لتشغيل واجهة البرنامج بنجاح."
-		log.Printf("❌ Failed to find or launch a compatible webview browser window")
-		showFatalMessageBox("SmartPower ERP - تعذر تشغيل الواجهة", errMsg)
-		if onWindowClose != nil {
-			onWindowClose()
-		}
+		// Fallback to opening default system browser
+		_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+		log.Printf("🖥️ Opened web interface in default browser: %s", url)
 		return
 	}
 

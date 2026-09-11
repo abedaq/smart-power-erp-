@@ -1945,3 +1945,36 @@ func (h *Handlers) ApplyUpdate(c *fiber.Ctx) error {
 		"message": "جاري استبدال البرنامج وإعادة التشغيل تلقائياً...",
 	})
 }
+
+// UpdateUI downloads and atomically applies the custom UI bundle
+func (h *Handlers) UpdateUI(c *fiber.Ctx) error {
+	if h.updateService == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"success": false,
+			"message": "خدمة التحديث غير متوفرة",
+		})
+	}
+
+	var req struct {
+		DownloadURL string `json:"download_url"`
+		SHA256      string `json:"sha256"`
+	}
+	if err := c.BodyParser(&req); err != nil || req.DownloadURL == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"message": "رابط تحميل حزمة الواجهة غير صالح",
+		})
+	}
+
+	if err := h.updateService.DownloadAndApplyUIUpdate(c.Context(), req.DownloadURL, req.SHA256); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"message": fmt.Sprintf("فشل تحديث حزمة الواجهة: %v", err),
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": "تم تحديث حزمة الواجهة وتطبيقها بنجاح",
+	})
+}

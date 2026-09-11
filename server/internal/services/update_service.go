@@ -1,6 +1,7 @@
 package services
 
 import (
+	"archive/zip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -30,9 +31,9 @@ var (
 	procShellExecuteW = shell32.NewProc("ShellExecuteW")
 )
 
-const (
+var (
 	// DefaultAppVersion represents current release version of SmartPower ERP
-	DefaultAppVersion = "3.4.3.4"
+	DefaultAppVersion = "3.4.3.6"
 	// DefaultManifestURL fallback remote version metadata endpoint
 	DefaultManifestURL = "https://pkuoytiickgbtfeffmxq.supabase.co/storage/v1/object/public/updates/version.json"
 )
@@ -247,7 +248,20 @@ func (s *UpdateService) CheckForUpdates() (*CheckUpdateResponse, error) {
 	}, nil
 }
 
-// DownloadUpdate downloads the update binary/executable into %TEMP%\SmartPowerERP_Update\
+func getUpdatesDir() string {
+	progData := os.Getenv("ProgramData")
+	if progData == "" {
+		progData = "C:\\ProgramData"
+	}
+	if _, err := os.Stat(progData); err != nil {
+		progData = os.TempDir()
+	}
+	updatesDir := filepath.Join(progData, "SmartPowerERP_Updates")
+	_ = os.MkdirAll(updatesDir, 0755)
+	return updatesDir
+}
+
+// DownloadUpdate downloads the update binary/executable into %ProgramData%\SmartPowerERP_Updates\
 // and verifies its SHA256 integrity while tracking progress.
 func (s *UpdateService) DownloadUpdate(ctx context.Context, downloadURL string, expectedSHA256 string) (string, error) {
 	if downloadURL == "" {
@@ -285,12 +299,7 @@ func (s *UpdateService) DownloadUpdate(ctx context.Context, downloadURL string, 
 
 	s.emitProgressEvent()
 
-	tempDir := filepath.Join(os.TempDir(), "SmartPowerERP_Update")
-	if err := os.MkdirAll(tempDir, 0755); err != nil {
-		s.recordError(fmt.Sprintf("failed to create temp directory: %v", err))
-		return "", err
-	}
-
+	tempDir := getUpdatesDir()
 	destPath := filepath.Join(tempDir, "SmartPowerERP_new.exe")
 	_ = os.Remove(destPath)
 
@@ -457,8 +466,8 @@ func (s *UpdateService) ApplyUpdate(downloadedFilePath string) error {
 	}
 
 	if downloadedFilePath == "" {
-		// Check default temp location
-		tempDefault := filepath.Join(os.TempDir(), "SmartPowerERP_Update", "SmartPowerERP_new.exe")
+		// Check default updates location
+		tempDefault := filepath.Join(getUpdatesDir(), "SmartPowerERP_new.exe")
 		if fi, err := os.Stat(tempDefault); err == nil && fi.Size() > 0 {
 			downloadedFilePath = tempDefault
 		}
@@ -488,134 +497,40 @@ func (s *UpdateService) ApplyUpdate(downloadedFilePath string) error {
 		}
 	}
 
-	backupExe := filepath.Join(targetDir, filepath.Base(currentExe)+".bak")
-	tempDir := filepath.Dir(downloadedFilePath)
-	scriptPath := filepath.Join(tempDir, "smartpower_apply_update.ps1")
-
 	pid := os.Getpid()
+	workDir := filepath.Dir(currentExe)
 
-	// Write hardened PowerShell updater script with transactional safety & de-elevation
-	scriptContent := fmt.Sprintf(`# ====================================================================
-# SmartPower ERP Resilient & Safe Auto-Updater (Hardened Engine)
-# ====================================================================
-$ErrorActionPreference = 'Stop'
-$pidToWait = %d
-$targetExe = '%s'
-$backupExe = '%s'
-$newExe    = '%s'
-
-# 1. Wait up to 3 seconds for current running process to terminate cleanly, then force kill
-try {
-    $proc = Get-Process -Id $pidToWait -ErrorAction SilentlyContinue
-    if ($proc) {
-        $proc.WaitForExit(3000)
-        if (-not $proc.HasExited) {
-            Stop-Process -Id $pidToWait -Force -ErrorAction SilentlyContinue
-        }
-    }
-} catch { }
-
-# Extra safety: Ensure no leftover SmartPowerERP instance is holding the binary or port 3000
-try {
-    Get-Process -Name 'SmartPowerERP' -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $PID } | Stop-Process -Force -ErrorAction SilentlyContinue
-} catch { }
-
-# Safety delay ensuring file handles are fully released
-Start-Sleep -Milliseconds 1000
-
-$success = $false
-try {
-    # 2. Backup current running executable
-    if (Test-Path $targetExe) {
-        Copy-Item -Path $targetExe -Destination $backupExe -Force
-    }
-
-    # 3. Resilient retry loop up to 15 retries with 500ms intervals
-    $retries = 15
-    while ($retries -gt 0) {
-        try {
-            [System.IO.File]::Copy($newExe, $targetExe, $true)
-            $success = $true
-            break
-        } catch {
-            try {
-                Copy-Item -Path $newExe -Destination $targetExe -Force
-                $success = $true
-                break
-            } catch {
-                $retries--
-                Start-Sleep -Milliseconds 500
-            }
-        }
-    }
-
-    if (-not $success) {
-        throw "Failed to replace executable after 15 attempts."
-    }
-
-    # Clean up temp new executable only upon success
-    if (Test-Path $newExe) {
-        Remove-Item -Path $newExe -Force -ErrorAction SilentlyContinue
-    }
-}
-catch {
-    # 4. Automated Rollback on any failure
-    if (Test-Path $backupExe) {
-        Copy-Item -Path $backupExe -Destination $targetExe -Force -ErrorAction SilentlyContinue
-    }
-
-    try {
-        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
-        [System.Windows.Forms.MessageBox]::Show("تعذر استبدال ملفات البرنامج. تم التراجع التلقائي وتشغيل الإصدار الحالي بأمان.", "SmartPower ERP - تنبيه التحديث", 0, 48)
-    } catch { }
-}
-finally {
-    # Safety delay ensuring port 3000 and DB connections are completely freed
-    Start-Sleep -Milliseconds 1500
-
-    # 5. Mandatory De-elevation to Standard User Token with explicit working directory (Prevents PostgreSQL admin crash)
-    $workDir = Split-Path -Path $targetExe -Parent
-    try {
-        $shell = New-Object -ComObject Shell.Application
-        $shell.ShellExecute($targetExe, "", $workDir, "open", 1)
-    } catch {
-        # Fallback de-elevation via explorer.exe
-        Start-Process 'explorer.exe' -ArgumentList ('\"' + $targetExe + '\"') -WorkingDirectory $workDir
-    }
-
-    # Clean up this updater script
-    Start-Sleep -Milliseconds 500
-    Remove-Item -Path $PSCommandPath -Force -ErrorAction SilentlyContinue
-}
-`, pid, currentExe, backupExe, downloadedFilePath)
-
-	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
-		return fmt.Errorf("failed to write updater helper script: %w", err)
+	// Locate native updater executable
+	updaterExe := filepath.Join(targetDir, "updater.exe")
+	if fi, err := os.Stat(updaterExe); err != nil || fi.Size() == 0 {
+		tempUpdater := filepath.Join(getUpdatesDir(), "updater.exe")
+		if fiT, errT := os.Stat(tempUpdater); errT == nil && fiT.Size() > 0 {
+			updaterExe = tempUpdater
+		}
 	}
 
-	log.Printf("🚀 Prepared hardened PowerShell updater script at: %s (Target PID: %d, Binary: %s)", scriptPath, pid, currentExe)
+	log.Printf("🚀 Launching native Go silent updater at: %s (PID: %d, Binary: %s)", updaterExe, pid, currentExe)
 
-	// Spawning elevated updater with native Windows ShellExecuteW
 	if runtime.GOOS == "windows" {
-		verbPtr, err := syscall.UTF16PtrFromString("runas")
+		verbPtr, err := syscall.UTF16PtrFromString("open")
 		if err != nil {
 			return fmt.Errorf("failed to encode verb: %w", err)
 		}
-		exePtr, err := syscall.UTF16PtrFromString("powershell.exe")
+		exePtr, err := syscall.UTF16PtrFromString(updaterExe)
 		if err != nil {
-			return fmt.Errorf("failed to encode exe: %w", err)
+			return fmt.Errorf("failed to encode updater path: %w", err)
 		}
-		argsStr := fmt.Sprintf("-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"%s\"", scriptPath)
+		argsStr := fmt.Sprintf("-pid=%d -target=\"%s\" -new=\"%s\" -workdir=\"%s\"", pid, currentExe, downloadedFilePath, workDir)
 		argsPtr, err := syscall.UTF16PtrFromString(argsStr)
 		if err != nil {
-			return fmt.Errorf("failed to encode args: %w", err)
+			return fmt.Errorf("failed to encode updater args: %w", err)
 		}
-		dirPtr, err := syscall.UTF16PtrFromString(filepath.Dir(scriptPath))
+		dirPtr, err := syscall.UTF16PtrFromString(workDir)
 		if err != nil {
-			return fmt.Errorf("failed to encode dir: %w", err)
+			return fmt.Errorf("failed to encode workdir: %w", err)
 		}
 
-		// SW_HIDE = 0
+		// SW_HIDE = 0 (completely windowless execution)
 		ret, _, _ := procShellExecuteW.Call(
 			0,
 			uintptr(unsafe.Pointer(verbPtr)),
@@ -626,16 +541,17 @@ finally {
 		)
 
 		if ret <= 32 {
-			if ret == 5 {
-				s.recordError("تم إلغاء نافذة تأكيد الصلاحيات (UAC) من قبل المستخدم")
-				log.Printf("⚠️ Update cancelled: User declined UAC prompt (Error 5)")
-				return fmt.Errorf("تم إلغاء نافذة تأكيد الصلاحيات (UAC) من قبل المستخدم")
+			// Fallback: direct exec.Command detached
+			cmd := exec.Command(updaterExe, fmt.Sprintf("-pid=%d", pid), fmt.Sprintf("-target=%s", currentExe), fmt.Sprintf("-new=%s", downloadedFilePath), fmt.Sprintf("-workdir=%s", workDir))
+			cmd.Dir = workDir
+			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000 | 0x00000008}
+			if startErr := cmd.Start(); startErr != nil {
+				s.recordError(fmt.Sprintf("فشل إطلاق المساعد التنفيذي للتحديث: %v", startErr))
+				log.Printf("❌ Failed to launch updater binary: %v", startErr)
+				return fmt.Errorf("فشل إطلاق المساعد التنفيذي للتحديث: %w", startErr)
 			}
-			s.recordError(fmt.Sprintf("فشل إطلاق عملية التحديث المرتفعة (كود الخطأ: %d)", ret))
-			log.Printf("❌ ShellExecuteW failed with code %d", ret)
-			return fmt.Errorf("فشل إطلاق عملية التحديث المرتفعة (كود الخطأ: %d)", ret)
 		}
-		log.Printf("✅ ShellExecuteW launched successfully with code %d. User accepted UAC.", ret)
+		log.Printf("✅ Native Go Updater launched successfully for PID %d", pid)
 	} else {
 		// Non-windows fallback
 		cmd := exec.Command("sh", "-c", fmt.Sprintf("sleep 2 && cp '%s' '%s' && rm -f '%s'", downloadedFilePath, currentExe, downloadedFilePath))
@@ -683,4 +599,162 @@ func (s *UpdateService) emitProgressEvent() {
 		s.mu.RUnlock()
 		s.eventHub.Broadcast("system:update_progress", p)
 	}
+}
+
+// DownloadAndApplyUIUpdate downloads the UI update bundle (ZIP), verifies SHA256 integrity,
+// safely extracts it with Anti-Zip Slip protection into custom_ui_temp,
+// closes all open file handles, and performs an atomic directory swap into custom_ui.
+func (s *UpdateService) DownloadAndApplyUIUpdate(ctx context.Context, downloadURL, expectedSHA256 string) error {
+	if downloadURL == "" {
+		return errors.New("UI update download URL is empty")
+	}
+
+	updatesDir := getUpdatesDir()
+	zipDestPath := filepath.Join(updatesDir, "ui_bundle.zip")
+	_ = os.Remove(zipDestPath)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to prepare UI download request: %w", err)
+	}
+	req.Header.Set("User-Agent", fmt.Sprintf("SmartPowerERP/%s", s.GetCurrentVersion()))
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("UI bundle download failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("UI bundle server returned HTTP %d", resp.StatusCode)
+	}
+
+	out, err := os.OpenFile(zipDestPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to create UI zip destination: %w", err)
+	}
+
+	hasher := sha256.New()
+	mw := io.MultiWriter(out, hasher)
+	_, copyErr := io.Copy(mw, resp.Body)
+	_ = out.Close()
+	if copyErr != nil {
+		_ = os.Remove(zipDestPath)
+		return fmt.Errorf("failed while downloading UI zip bundle: %w", copyErr)
+	}
+
+	// Verify SHA256 integrity checksum if specified
+	if strings.TrimSpace(expectedSHA256) != "" {
+		calcHash := hex.EncodeToString(hasher.Sum(nil))
+		if !strings.EqualFold(calcHash, strings.TrimSpace(expectedSHA256)) {
+			_ = os.Remove(zipDestPath)
+			return fmt.Errorf("UI bundle SHA256 integrity mismatch! Expected: %s, Computed: %s", expectedSHA256, calcHash)
+		}
+		log.Printf("🔒 UI bundle SHA256 verified successfully: %s", calcHash)
+	}
+
+	localAppData := os.Getenv("LOCALAPPDATA")
+	if localAppData == "" {
+		localAppData = os.Getenv("APPDATA")
+	}
+	if localAppData == "" {
+		localAppData = "."
+	}
+
+	baseDir := filepath.Join(localAppData, "SmartPowerERP")
+	customUIDir := filepath.Join(baseDir, "custom_ui")
+	customUITemp := filepath.Join(baseDir, "custom_ui_temp")
+	customUIOld := filepath.Join(baseDir, "custom_ui_old")
+
+	_ = os.RemoveAll(customUITemp)
+	if err := os.MkdirAll(customUITemp, 0755); err != nil {
+		_ = os.Remove(zipDestPath)
+		return fmt.Errorf("failed to create temp extraction directory: %w", err)
+	}
+
+	// Unzip with Anti-Zip Slip protection
+	extractErr := func() error {
+		zipReader, err := zip.OpenReader(zipDestPath)
+		if err != nil {
+			return fmt.Errorf("failed to open UI zip bundle: %w", err)
+		}
+		defer zipReader.Close()
+
+		cleanDestDir := filepath.Clean(customUITemp) + string(os.PathSeparator)
+
+		for _, f := range zipReader.File {
+			targetPath := filepath.Join(customUITemp, f.Name)
+			cleanTarget := filepath.Clean(targetPath)
+
+			// Anti-Zip Slip verification
+			if !strings.HasPrefix(cleanTarget+string(os.PathSeparator), cleanDestDir) && cleanTarget != filepath.Clean(customUITemp) {
+				return fmt.Errorf("security violation: illegal path in zip archive (zip-slip detected): %s", f.Name)
+			}
+
+			if f.FileInfo().IsDir() {
+				if err := os.MkdirAll(cleanTarget, f.Mode()); err != nil {
+					return err
+				}
+				continue
+			}
+
+			if err := os.MkdirAll(filepath.Dir(cleanTarget), 0755); err != nil {
+				return err
+			}
+
+			rc, err := f.Open()
+			if err != nil {
+				return err
+			}
+
+			dstFile, err := os.OpenFile(cleanTarget, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+			if err != nil {
+				_ = rc.Close()
+				return err
+			}
+
+			_, copyErr := io.Copy(dstFile, rc)
+			_ = rc.Close()
+			_ = dstFile.Close()
+			if copyErr != nil {
+				return copyErr
+			}
+		}
+		return nil
+	}()
+
+	// Ensure downloaded zip archive is deleted after extraction and file descriptor release
+	_ = os.Remove(zipDestPath)
+
+	if extractErr != nil {
+		_ = os.RemoveAll(customUITemp)
+		return fmt.Errorf("UI extraction failed: %w", extractErr)
+	}
+
+	// Atomic Swap:
+	// 1. Remove custom_ui_old if exists
+	_ = os.RemoveAll(customUIOld)
+
+	// 2. If custom_ui exists, rename to custom_ui_old
+	if _, err := os.Stat(customUIDir); err == nil {
+		if err := os.Rename(customUIDir, customUIOld); err != nil {
+			_ = os.RemoveAll(customUITemp)
+			return fmt.Errorf("failed to move active UI to backup: %w", err)
+		}
+	}
+
+	// 3. Rename custom_ui_temp to custom_ui
+	if err := os.Rename(customUITemp, customUIDir); err != nil {
+		// Attempt rollback
+		if _, statErr := os.Stat(customUIOld); statErr == nil {
+			_ = os.Rename(customUIOld, customUIDir)
+		}
+		return fmt.Errorf("atomic swap failed (promoted temp UI): %w", err)
+	}
+
+	// 4. Clean up custom_ui_old
+	_ = os.RemoveAll(customUIOld)
+
+	log.Printf("✨ UI bundle successfully updated and atomically deployed to: %s", customUIDir)
+	return nil
 }

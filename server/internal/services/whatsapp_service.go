@@ -154,10 +154,10 @@ func (s *WhatsAppService) Start() {
 		}
 	} else {
 		s.mu.Lock()
-		s.status = "CONNECTING"
+		s.status = "INITIALIZING"
 		s.currentQR = ""
 		s.mu.Unlock()
-		s.persistSessionStatus("CONNECTING", "")
+		s.persistSessionStatus("INITIALIZING", "")
 	}
 
 	err := s.client.Connect()

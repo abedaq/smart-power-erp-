@@ -63,7 +63,9 @@ if (Get-Command npm -ErrorAction SilentlyContinue) {
 
 $UiDistDir = Join-Path $ServerDir "internal\ui\dist"
 if (Test-Path (Join-Path $FrontendDir "dist")) {
-    if (-not (Test-Path $UiDistDir)) {
+    if (Test-Path $UiDistDir) {
+        Remove-Item -Path (Join-Path $UiDistDir "*") -Recurse -Force -ErrorAction SilentlyContinue
+    } else {
         New-Item -ItemType Directory -Force -Path $UiDistDir | Out-Null
     }
     Copy-Item -Path (Join-Path $FrontendDir "dist\*") -Destination $UiDistDir -Recurse -Force
@@ -83,6 +85,11 @@ try {
     go build -ldflags "-s -w -H=windowsgui" -o (Join-Path $DistPortableDir "SmartPowerERP.exe") ./cmd/server
     $exeLen = (Get-Item (Join-Path $DistPortableDir "SmartPowerERP.exe")).Length
     Write-Host "Compiled SmartPowerERP.exe successfully ($exeLen bytes)" -ForegroundColor Green
+
+    Write-Host "Compiling native updater helper (updater.exe)..." -ForegroundColor Magenta
+    go build -ldflags "-s -w -H=windowsgui" -o (Join-Path $DistPortableDir "updater.exe") ./cmd/updater
+    $updLen = (Get-Item (Join-Path $DistPortableDir "updater.exe")).Length
+    Write-Host "Compiled updater.exe successfully ($updLen bytes)" -ForegroundColor Green
 } finally {
     Pop-Location
 }

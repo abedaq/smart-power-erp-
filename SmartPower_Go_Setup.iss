@@ -5,7 +5,7 @@
 ; =====================================================================
 
 #define MyAppName "Smart Power ERP"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "3.4.3.5"
 #define MyAppPublisher "SmartPower Technologies"
 #define MyAppExeName "SmartPowerERP.exe"
 
@@ -14,7 +14,7 @@ AppId={{D8A1B7C3-9F24-4E88-A63E-5B1D0E47F9A2}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={autopf}\Smart Power ERP
+DefaultDirName={localappdata}\Programs\Smart Power ERP
 DefaultGroupName={#MyAppName}
 OutputDir=.\
 OutputBaseFilename=Setup
@@ -26,7 +26,8 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
 DisableProgramGroupPage=yes
 DirExistsWarning=no
-PrivilegesRequired=admin
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
 CloseApplications=no
 RestartApplications=no
 UsePreviousAppDir=yes
@@ -46,9 +47,10 @@ Source: "redist\VC_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall 
 Source: "redist\MicrosoftEdgeWebview2Setup.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall ignoreversion
 
 ; ---------------------------------------------------------------------
-; 2. Main Executable and Application Icons
+; 2. Main Executable, Updater and Application Icons
 ; ---------------------------------------------------------------------
 Source: "dist_portable\SmartPowerERP.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist_portable\updater.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "icon.png"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -154,16 +156,44 @@ begin
 end;
 
 // ---------------------------------------------------------------------
-// Safe process termination before setup and uninstall
+// Safe process termination and legacy shortcuts cleanup
 // ---------------------------------------------------------------------
+procedure CleanLegacyShortcuts();
+var
+  OldPath: String;
+begin
+  // Remove common legacy desktop shortcuts (from previous Program Files installation)
+  OldPath := ExpandConstant('{commondesktop}\{#MyAppName}.lnk');
+  if FileExists(OldPath) then DeleteFile(OldPath);
+
+  OldPath := ExpandConstant('{commonprograms}\{#MyAppName}.lnk');
+  if FileExists(OldPath) then DeleteFile(OldPath);
+
+  OldPath := ExpandConstant('{userdesktop}\{#MyAppName}.lnk');
+  if FileExists(OldPath) then DeleteFile(OldPath);
+
+  OldPath := ExpandConstant('{userprograms}\{#MyAppName}.lnk');
+  if FileExists(OldPath) then DeleteFile(OldPath);
+end;
+
 function InitializeSetup(): Boolean;
 var
   ResultCode: Integer;
 begin
   Exec('taskkill.exe', '/F /IM SmartPowerERP.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill.exe', '/F /IM updater.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('taskkill.exe', '/F /IM postgres.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Sleep(500);
+  CleanLegacyShortcuts();
   Result := True;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssInstall then
+  begin
+    CleanLegacyShortcuts();
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -173,8 +203,10 @@ begin
   if CurUninstallStep = usUninstall then
   begin
     Exec('taskkill.exe', '/F /IM SmartPowerERP.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec('taskkill.exe', '/F /IM updater.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec('taskkill.exe', '/F /IM postgres.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(500);
+    CleanLegacyShortcuts();
   end
   else if CurUninstallStep = usPostUninstall then
   begin

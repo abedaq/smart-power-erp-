@@ -9,13 +9,40 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
+
+var (
+	kernel32DLL           = syscall.NewLazyDLL("kernel32.dll")
+	procGetShortPathNameW = kernel32DLL.NewProc("GetShortPathNameW")
+)
+
+func toShortPath(path string) string {
+	if path == "" || runtime.GOOS != "windows" {
+		return path
+	}
+	u16, err := syscall.UTF16FromString(path)
+	if err != nil {
+		return path
+	}
+	buf := make([]uint16, 1024)
+	ret, _, _ := procGetShortPathNameW.Call(
+		uintptr(unsafe.Pointer(&u16[0])),
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(len(buf)),
+	)
+	if ret == 0 {
+		return path
+	}
+	return syscall.UTF16ToString(buf[:ret])
+}
 
 type DBLifecycleManager struct {
 	AppDir       string
@@ -84,6 +111,7 @@ func (m *DBLifecycleManager) EnsureDatabaseReady() (string, error) {
 	if err := os.MkdirAll(m.DataDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create database directory: %w", err)
 	}
+	m.DataDir = toShortPath(m.DataDir)
 
 	pgVersionFile := filepath.Join(m.DataDir, "PG_VERSION")
 	needsInitCluster := false
@@ -156,7 +184,7 @@ func (m *DBLifecycleManager) initDB() error {
 	)
 	cmd.Dir = m.PgBinDir
 	pathEnv := fmt.Sprintf("PATH=%s;%s", m.PgBinDir, os.Getenv("PATH"))
-	cmd.Env = append(os.Environ(), pathEnv)
+	cmd.Env = append(os.Environ(), pathEnv, "PGCLIENTENCODING=UTF8")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -176,11 +204,13 @@ func (m *DBLifecycleManager) cleanStalePID() {
 	if len(lines) > 0 {
 		pid, err := strconv.Atoi(strings.TrimSpace(lines[0]))
 		if err == nil {
-			chk := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid))
+			chk := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH")
 			chk.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
 			out, _ := chk.Output()
-			if !strings.Contains(string(out), fmt.Sprintf("%d", pid)) {
-				log.Printf("🧹 Removing stale postmaster.pid (PID %d is no longer active)", pid)
+			outStr := strings.ToLower(string(out))
+			// Only remove postmaster.pid if process is not running or is not postgres.exe
+			if !strings.Contains(outStr, "postgres.exe") {
+				log.Printf("🧹 Removing stale postmaster.pid (PID %d is no longer active postgres process)", pid)
 				_ = os.Remove(pidFile)
 			}
 		}
@@ -202,7 +232,7 @@ func (m *DBLifecycleManager) startPostgres() error {
 	}
 
 	pgCtl := filepath.Join(m.PgBinDir, "pg_ctl.exe")
-	logFile := filepath.Join(m.DataDir, "server.log")
+	logFile := filepath.Join(m.DataDir, "postgres_engine.log")
 
 	cmd := exec.Command(pgCtl,
 		"-D", m.DataDir,
@@ -214,7 +244,7 @@ func (m *DBLifecycleManager) startPostgres() error {
 	)
 	cmd.Dir = m.PgBinDir
 	pathEnv := fmt.Sprintf("PATH=%s;%s", m.PgBinDir, os.Getenv("PATH"))
-	cmd.Env = append(os.Environ(), pathEnv)
+	cmd.Env = append(os.Environ(), pathEnv, "PGCLIENTENCODING=UTF8")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
 	cmd.Stdout = nil
 	cmd.Stderr = nil
@@ -271,7 +301,7 @@ func (m *DBLifecycleManager) createDatabaseAndSeed() error {
 			)
 			cmd.Dir = m.PgBinDir
 			pathEnv := fmt.Sprintf("PATH=%s;%s", m.PgBinDir, os.Getenv("PATH"))
-			cmd.Env = append(os.Environ(), pathEnv)
+			cmd.Env = append(os.Environ(), pathEnv, "PGCLIENTENCODING=UTF8")
 			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
 			out, err := cmd.CombinedOutput()
 			if err != nil {
@@ -291,7 +321,7 @@ func (m *DBLifecycleManager) Stop() error {
 	cmd := exec.Command(pgCtl, "-D", m.DataDir, "-m", "fast", "stop")
 	cmd.Dir = m.PgBinDir
 	pathEnv := fmt.Sprintf("PATH=%s;%s", m.PgBinDir, os.Getenv("PATH"))
-	cmd.Env = append(os.Environ(), pathEnv)
+	cmd.Env = append(os.Environ(), pathEnv, "PGCLIENTENCODING=UTF8")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
 	cmd.Stdout = nil
 	cmd.Stderr = nil
@@ -313,7 +343,7 @@ func copyDirectory(srcDir, dstDir string) error {
 			return os.MkdirAll(targetPath, info.Mode())
 		}
 		base := info.Name()
-		if base == "postmaster.pid" || base == "postmaster.opts" || strings.HasPrefix(base, "server.log") {
+		if base == "postmaster.pid" || base == "postmaster.opts" || strings.HasPrefix(base, "server.log") || strings.HasPrefix(base, "postgres_engine.log") {
 			return nil
 		}
 		srcFile, err := os.Open(path)

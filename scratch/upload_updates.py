@@ -22,53 +22,127 @@ def compute_sha256(filepath):
             h.update(chunk)
     return h.hexdigest().upper()
 
-def upload_file_curl(filename, filepath, content_type="application/octet-stream"):
-    url = f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/{filename}"
-    cmd = [
-        "curl.exe", "-X", "POST", url,
-        "-H", f"Authorization: Bearer {ANON_KEY}",
-        "-H", f"apikey: {ANON_KEY}",
-        "-H", "x-upsert: true",
-        "-H", f"Content-Type: {content_type}",
-        "--data-binary", f"@{filepath}"
-    ]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0:
-        print(f"[ERROR] curl failed for {filename}: {res.stderr}")
+import base64
+import requests
+
+def encode_metadata(meta_dict):
+    parts = []
+    for k, v in meta_dict.items():
+        encoded = base64.b64encode(v.encode('utf-8')).decode('utf-8')
+        parts.append(f"{k} {encoded}")
+    return ",".join(parts)
+
+def upload_file_requests(filename, filepath, content_type="application/octet-stream"):
+    file_size = os.path.getsize(filepath)
+    print(f"[INFO] Initializing TUS resumable upload for {filename} ({file_size} bytes)...", flush=True)
+    
+    # 1. Delete existing object to avoid 409 Conflict in TUS
+    del_url = f"{SUPABASE_URL}/storage/v1/object/{BUCKET}"
+    del_headers = {
+        "Authorization": f"Bearer {ANON_KEY}",
+        "apikey": ANON_KEY,
+        "Content-Type": "application/json"
+    }
+    requests.delete(del_url, headers=del_headers, json={"prefixes": [filename]}, timeout=15)
+    
+    meta = {
+        "bucketName": BUCKET,
+        "objectName": filename,
+        "contentType": content_type
+    }
+    
+    init_headers = {
+        "Authorization": f"Bearer {ANON_KEY}",
+        "apikey": ANON_KEY,
+        "Upload-Length": str(file_size),
+        "Upload-Metadata": encode_metadata(meta),
+        "Tus-Resumable": "1.0.0",
+        "x-upsert": "true"
+    }
+    
+    init_url = f"{SUPABASE_URL}/storage/v1/upload/resumable"
+    resp = requests.post(init_url, headers=init_headers, timeout=30)
+    
+    if resp.status_code not in (200, 201):
+        print(f"[ERROR] TUS init failed (HTTP {resp.status_code}): {resp.text}", flush=True)
         return False
-    print(f"[SUCCESS] Uploaded {filename}: {res.stdout.strip()}")
+        
+    location = resp.headers.get("Location")
+    if not location:
+        print("[ERROR] No Location header in TUS init response", flush=True)
+        return False
+        
+    if location.startswith("/"):
+        upload_url = f"{SUPABASE_URL}{location}"
+    else:
+        upload_url = location
+        
+    print(f"[SUCCESS] TUS session created: {upload_url}", flush=True)
+    
+    chunk_size = 4 * 1024 * 1024  # 4 MB chunks
+    offset = 0
+    
+    with open(filepath, "rb") as f:
+        while offset < file_size:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+                
+            patch_headers = {
+                "Authorization": f"Bearer {ANON_KEY}",
+                "apikey": ANON_KEY,
+                "Upload-Offset": str(offset),
+                "Content-Type": "application/offset+octet-stream",
+                "Tus-Resumable": "1.0.0"
+            }
+            
+            chunk_len = len(chunk)
+            print(f"[INFO] Uploading chunk: {offset} to {offset + chunk_len} - {(offset/file_size)*100:.1f}%...")
+            
+            success = False
+            for attempt in range(5):
+                try:
+                    patch_resp = requests.patch(upload_url, headers=patch_headers, data=chunk, timeout=120)
+                    if patch_resp.status_code in (200, 204):
+                        offset_header = patch_resp.headers.get("Upload-Offset")
+                        if offset_header:
+                            offset = int(offset_header)
+                        else:
+                            offset += chunk_len
+                        success = True
+                        break
+                    else:
+                        print(f"⚠️ Chunk warning (HTTP {patch_resp.status_code}): {patch_resp.text}")
+                except Exception as ex:
+                    print(f"⚠️ Chunk exception: {ex}, retrying ({attempt+1}/5)...")
+            
+            if not success:
+                print(f"[ERROR] Failed to upload chunk at offset {offset}")
+                return False
+                
+    print(f"🎉 [SUCCESS] File {filename} uploaded completely via TUS!")
     return True
 
-def upload_json_curl(filename, data_dict):
+def upload_json_requests(filename, data_dict):
     url = f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/{filename}"
-    json_str = json.dumps(data_dict, ensure_ascii=False, indent=2)
-    temp_json = os.path.join(os.path.dirname(__file__), "temp_version.json")
-    with open(temp_json, "w", encoding="utf-8") as f:
-        f.write(json_str)
-        
-    cmd = [
-        "curl.exe", "-X", "POST", url,
-        "-H", f"Authorization: Bearer {ANON_KEY}",
-        "-H", f"apikey: {ANON_KEY}",
-        "-H", "x-upsert: true",
-        "-H", "Content-Type: application/json",
-        "--data-binary", f"@{temp_json}"
-    ]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    try:
-        os.remove(temp_json)
-    except Exception:
-        pass
-        
-    if res.returncode != 0:
-        print(f"[ERROR] curl failed for {filename}: {res.stderr}")
+    headers = {
+        "Authorization": f"Bearer {ANON_KEY}",
+        "apikey": ANON_KEY,
+        "x-upsert": "true",
+        "Content-Type": "application/json"
+    }
+    resp = requests.post(url, headers=headers, json=data_dict, timeout=30)
+    if resp.status_code not in (200, 201):
+        print(f"[ERROR] Upload JSON failed (HTTP {resp.status_code}): {resp.text}", flush=True)
         return False
-    print(f"[SUCCESS] Uploaded {filename}: {res.stdout.strip()}")
+    print(f"[SUCCESS] Uploaded {filename}: {resp.text}", flush=True)
     return True
 
 def main():
     parser = argparse.ArgumentParser(description="Upload updates to Supabase Storage")
     parser.add_argument("--manifest-only", action="store_true", help="Upload only version.json manifest")
+    parser.add_argument("--version", default="3.4.3.5", help="Target release version string")
+    parser.add_argument("--changelog", default="⚡ تحديث التحصين المعماري v3.4.3.5: عزل سجلات المحرك بالكامل، تسريع الإقلاع، وحماية الاستبدال الذري وتحديثات الواجهة التلقائية.", help="Changelog text")
     args = parser.parse_args()
 
     root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -84,26 +158,26 @@ def main():
     # 1. Upload SmartPowerERP.exe if not manifest-only
     if not args.manifest_only:
         print(f"[INFO] Uploading SmartPowerERP.exe ({os.path.getsize(dist_exe)} bytes) to Supabase Storage bucket '{BUCKET}'...")
-        if not upload_file_curl("SmartPowerERP.exe", dist_exe, "application/octet-stream"):
+        if not upload_file_requests("SmartPowerERP.exe", dist_exe, "application/octet-stream"):
             print("[ERROR] Failed to upload executable.")
             sys.exit(1)
         
     # 2. Prepare and Upload version.json
     manifest = {
-        "version": "1.0.7",
+        "version": args.version,
         "download_url": f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/SmartPowerERP.exe",
         "sha256": exe_sha256,
-        "changelog": "🚀 إصدار السحاب v1.0.7: صندوق حوار التحديث الرشيق المطور وتثبيت تلقائي بضغطة زر واحدة.",
+        "changelog": args.changelog,
         "mandatory": False,
         "release_date": "2026-09-10"
     }
     
-    print(f"[INFO] Uploading version.json (v1.0.7)...")
-    if not upload_json_curl("version.json", manifest):
+    print(f"[INFO] Uploading version.json (v{args.version})...")
+    if not upload_json_requests("version.json", manifest):
         print("[ERROR] Failed to upload version.json.")
         sys.exit(1)
         
-    print("\n[COMPLETE] Supabase Storage Release v1.0.7 completed successfully!")
+    print(f"\n[COMPLETE] Supabase Storage Release v{args.version} completed successfully!")
 
 if __name__ == "__main__":
     main()
