@@ -27,10 +27,11 @@ type Handlers struct {
 	renderService   *services.InvoiceRenderService
 	excelService    *services.ExcelService
 	backupService   *services.BackupService
-	whatsappService *services.WhatsAppService
-	updateService   *services.UpdateService
-	eventHub        *services.EventHub
-	db              *gorm.DB
+	whatsappService    *services.WhatsAppService
+	updateService      *services.UpdateService
+	diagnosticsService *services.DiagnosticsService
+	eventHub           *services.EventHub
+	db                 *gorm.DB
 }
 
 func NewHandlers(
@@ -60,6 +61,10 @@ func NewHandlers(
 		eventHub:        eventHub,
 		db:              database.DB,
 	}
+}
+
+func (h *Handlers) SetDiagnosticsService(ds *services.DiagnosticsService) {
+	h.diagnosticsService = ds
 }
 
 // ---------------- REALTIME EVENT STREAM HANDLER ----------------
@@ -1976,5 +1981,59 @@ func (h *Handlers) UpdateUI(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"success": true,
 		"message": "تم تحديث حزمة الواجهة وتطبيقها بنجاح",
+	})
+}
+
+// ---------------- DIAGNOSTICS & SUPPORT HANDLERS ----------------
+
+func (h *Handlers) UploadDiagnostics(c *fiber.Ctx) error {
+	if h.diagnosticsService == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"success": false,
+			"message": "خدمة التشخيص الفني غير مفعلة",
+		})
+	}
+
+	var req struct {
+		UserNote string `json:"user_note"`
+	}
+	_ = c.BodyParser(&req)
+
+	res, err := h.diagnosticsService.UploadToCloud(req.UserNote)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"message": fmt.Sprintf("فشل رفع تقرير الدعم الفني: %v", err),
+		})
+	}
+
+	return c.JSON(res)
+}
+
+func (h *Handlers) ExportDiagnostics(c *fiber.Ctx) error {
+	if h.diagnosticsService == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"success": false,
+			"message": "خدمة التشخيص الفني غير مفعلة",
+		})
+	}
+
+	var req struct {
+		UserNote string `json:"user_note"`
+	}
+	_ = c.BodyParser(&req)
+
+	path, err := h.diagnosticsService.ExportToDesktop(req.UserNote)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"message": fmt.Sprintf("فشل تصدير السجلات لسطح المكتب: %v", err),
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"success":   true,
+		"message":   "تم تصدير حزمة تقرير التشخيص بنجاح إلى سطح المكتب",
+		"file_path": path,
 	})
 }

@@ -2,12 +2,13 @@ import React from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Navigate } from 'react-router-dom';
-import { Settings as SettingsIcon, Smartphone, UserCheck, ShieldAlert, Sparkles } from 'lucide-react';
+import { Settings as SettingsIcon, Smartphone, UserCheck, ShieldAlert, Sparkles, LifeBuoy } from 'lucide-react';
 import { useUpdate } from '../context/UpdateContext';
 import WhatsApp from './WhatsApp';
 import UsersManagement from './UsersManagement';
 import AuditLogs from './AuditLogs';
 import SystemUpdates from './SystemUpdates';
+import SupportDiagnostics from './SupportDiagnostics';
 
 const Settings: React.FC = () => {
   const { user } = useAuth();
@@ -91,6 +92,18 @@ const Settings: React.FC = () => {
             <span className="w-2.5 h-2.5 bg-rose-500 rounded-full animate-ping absolute top-2.5 left-2.5" />
           )}
         </button>
+
+        <button
+          onClick={() => setTab('diagnostics')}
+          className={`flex items-center gap-2.5 px-6 py-3 font-black text-sm rounded-xl transition-all ${
+            activeTab === 'diagnostics'
+              ? 'bg-white text-sky-900 shadow-md border border-sky-200 ring-2 ring-sky-500/20'
+              : 'text-slate-700 hover:text-slate-900 hover:bg-white/60'
+          }`}
+        >
+          <LifeBuoy size={20} className={activeTab === 'diagnostics' ? 'text-sky-600' : 'text-slate-500'} />
+          <span>الدعم الفني وتشخيص السجلات</span>
+        </button>
       </div>
 
       {/* Tab Content */}
@@ -115,6 +128,12 @@ const Settings: React.FC = () => {
       {activeTab === 'updates' && (
         <div>
           <SystemUpdates />
+        </div>
+      )}
+
+      {activeTab === 'diagnostics' && (
+        <div>
+          <SupportDiagnostics />
         </div>
       )}
     </div>

@@ -210,3 +210,35 @@ func TestEventHubUpdateProgressBroadcast(t *testing.T) {
 	}
 }
 
+func TestTargetedCanaryUpdateFiltering(t *testing.T) {
+	// Manifest targeted ONLY to license "SP-TARGETED-999"
+	manifest := UpdateManifest{
+		Version:        "2.0.0",
+		DownloadURL:    "https://example.com/update.exe",
+		SHA256:         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+		Changelog:      "ترقيع تجريبي لمشترك محدد",
+		TargetLicenses: []string{"SP-TARGETED-999"},
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(manifest)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{}
+	svc := NewUpdateService(cfg, nil, nil)
+	svc.SetManifestURL(server.URL)
+	svc.SetCurrentVersion("1.0.0")
+
+	// Current device does not have license SP-TARGETED-999 -> Update should be suppressed!
+	res, err := svc.CheckForUpdates()
+	if err != nil {
+		t.Fatalf("CheckForUpdates error: %v", err)
+	}
+
+	if res.HasUpdate {
+		t.Errorf("Expected HasUpdate=false because current device is not in TargetLicenses, got true")
+	}
+}
+

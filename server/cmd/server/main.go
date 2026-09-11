@@ -415,6 +415,9 @@ func main() {
 	// 4.2 Initialize Auto-Updater Service
 	updateService := services.NewUpdateService(cfg, eventHub, nil)
 
+	// 4.3 Initialize Diagnostics & Support Service
+	diagnosticsService := services.NewDiagnosticsService(cfg)
+
 	// 5. Initialize Handlers
 	h := handlers.NewHandlers(
 		authService,
@@ -429,6 +432,7 @@ func main() {
 		updateService,
 		eventHub,
 	)
+	h.SetDiagnosticsService(diagnosticsService)
 
 	// 6. Setup Fiber Web Application
 	app := fiber.New(fiber.Config{
@@ -541,6 +545,8 @@ func main() {
 
 	// System & Network Info
 	api.Get("/system/network-info", h.GetNetworkInfo)
+	api.Post("/system/diagnostics/upload", h.UploadDiagnostics)
+	api.Post("/system/diagnostics/export", h.ExportDiagnostics)
 
 	// License routes (Public for activation & check)
 	api.Get("/license/status", h.GetLicenseStatus)

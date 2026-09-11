@@ -143,6 +143,8 @@ def main():
     parser.add_argument("--manifest-only", action="store_true", help="Upload only version.json manifest")
     parser.add_argument("--version", default="3.4.3.5", help="Target release version string")
     parser.add_argument("--changelog", default="⚡ تحديث التحصين المعماري v3.4.3.5: عزل سجلات المحرك بالكامل، تسريع الإقلاع، وحماية الاستبدال الذري وتحديثات الواجهة التلقائية.", help="Changelog text")
+    parser.add_argument("--target-license", default="", help="Comma-separated target license keys for canary/patch update")
+    parser.add_argument("--target-hwid", default="", help="Comma-separated target HWIDs for canary/patch update")
     args = parser.parse_args()
 
     root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -163,14 +165,24 @@ def main():
             sys.exit(1)
         
     # 2. Prepare and Upload version.json
+    target_licenses = [x.strip() for x in args.target_license.split(",") if x.strip()]
+    target_hwids = [x.strip() for x in args.target_hwid.split(",") if x.strip()]
+
     manifest = {
         "version": args.version,
         "download_url": f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/SmartPowerERP.exe",
         "sha256": exe_sha256,
         "changelog": args.changelog,
         "mandatory": False,
-        "release_date": "2026-09-10"
+        "release_date": "2026-09-11"
     }
+
+    if target_licenses:
+        manifest["target_licenses"] = target_licenses
+        print(f"🎯 [CANARY] Targeted Release for Licenses: {target_licenses}")
+    if target_hwids:
+        manifest["target_hwids"] = target_hwids
+        print(f"🎯 [CANARY] Targeted Release for HWIDs: {target_hwids}")
     
     print(f"[INFO] Uploading version.json (v{args.version})...")
     if not upload_json_requests("version.json", manifest):

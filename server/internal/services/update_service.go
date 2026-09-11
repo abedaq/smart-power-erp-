@@ -24,6 +24,7 @@ import (
 	"unsafe"
 
 	"smartpower/internal/config"
+	"smartpower/internal/licensing"
 )
 
 var (
@@ -33,20 +34,22 @@ var (
 
 var (
 	// DefaultAppVersion represents current release version of SmartPower ERP
-	DefaultAppVersion = "3.4.3.9"
+	DefaultAppVersion = "3.4.4.0"
 	// DefaultManifestURL fallback remote version metadata endpoint
 	DefaultManifestURL = "https://pkuoytiickgbtfeffmxq.supabase.co/storage/v1/object/public/updates/version.json"
 )
 
 // UpdateManifest describes remote version metadata
 type UpdateManifest struct {
-	Version     string `json:"version"`
-	DownloadURL string `json:"download_url"`
-	SHA256      string `json:"sha256"`
-	Changelog   string `json:"changelog"`
-	Mandatory   bool   `json:"mandatory"`
-	ReleaseDate string `json:"release_date,omitempty"`
-	MinVersion  string `json:"min_version,omitempty"`
+	Version        string   `json:"version"`
+	DownloadURL    string   `json:"download_url"`
+	SHA256         string   `json:"sha256"`
+	Changelog      string   `json:"changelog"`
+	Mandatory      bool     `json:"mandatory"`
+	ReleaseDate    string   `json:"release_date,omitempty"`
+	MinVersion     string   `json:"min_version,omitempty"`
+	TargetLicenses []string `json:"target_licenses,omitempty"`
+	TargetHWIDs    []string `json:"target_hwids,omitempty"`
 }
 
 // CheckUpdateResponse describes update availability response
@@ -226,6 +229,40 @@ func (s *UpdateService) CheckForUpdates() (*CheckUpdateResponse, error) {
 	}
 
 	hasUpdate := IsNewerVersion(manifest.Version, currentVer)
+
+	// Targeted Canary Filtering (Safeguard 2):
+	// If TargetLicenses or TargetHWIDs are non-empty, the update is restricted ONLY to matching devices.
+	if hasUpdate && (len(manifest.TargetLicenses) > 0 || len(manifest.TargetHWIDs) > 0) {
+		licMgr := licensing.GetLicenseManager()
+		currentHWID := licensing.GetMachineHWID()
+		currentLicKey := ""
+		if licMgr != nil {
+			currentLicKey = licMgr.GetStatus().LicenseKey
+		}
+
+		matched := false
+		for _, l := range manifest.TargetLicenses {
+			trimmed := strings.TrimSpace(l)
+			if trimmed != "" && strings.EqualFold(trimmed, strings.TrimSpace(currentLicKey)) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			for _, h := range manifest.TargetHWIDs {
+				trimmed := strings.TrimSpace(h)
+				if trimmed != "" && strings.EqualFold(trimmed, strings.TrimSpace(currentHWID)) {
+					matched = true
+					break
+				}
+			}
+		}
+
+		if !matched {
+			// This device is not whitelisted for this canary/patch update -> suppress update notification
+			hasUpdate = false
+		}
+	}
 
 	// If min_version is specified and current version is lower, update is mandatory
 	isMandatory := manifest.Mandatory
