@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -2023,7 +2024,7 @@ func (h *Handlers) ExportDiagnostics(c *fiber.Ctx) error {
 	}
 	_ = c.BodyParser(&req)
 
-	path, err := h.diagnosticsService.ExportToDesktop(req.UserNote)
+	path, zipData, err := h.diagnosticsService.ExportToDesktop(req.UserNote)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
@@ -2031,9 +2032,12 @@ func (h *Handlers) ExportDiagnostics(c *fiber.Ctx) error {
 		})
 	}
 
-	return c.JSON(fiber.Map{
-		"success":   true,
-		"message":   "تم تصدير حزمة تقرير التشخيص بنجاح إلى سطح المكتب",
-		"file_path": path,
-	})
+	// Set headers for direct browser download
+	fileName := filepath.Base(path)
+	c.Set("Content-Type", "application/zip")
+	c.Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", fileName))
+	c.Set("X-File-Path", path)
+	c.Set("Access-Control-Expose-Headers", "X-File-Path, Content-Disposition")
+
+	return c.Send(zipData)
 }

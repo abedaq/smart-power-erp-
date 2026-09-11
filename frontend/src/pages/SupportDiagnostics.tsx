@@ -44,14 +44,27 @@ export const SupportDiagnostics: React.FC = () => {
     setExportSuccess(null);
     setErrorMessage(null);
     try {
-      const res = await api.post('/system/diagnostics/export', { user_note: userNote });
-      if (res.data?.success) {
-        setExportSuccess(`تم حفظ ملف حزمة التشخيص بنجاح في: ${res.data.file_path}`);
-      } else {
-        setErrorMessage(res.data?.message || 'تعذر تصدير السجلات.');
-      }
+      const res = await api.post('/system/diagnostics/export', { user_note: userNote }, {
+        responseType: 'blob'
+      });
+
+      const filePath = res.headers['x-file-path'] || 'سطح المكتب';
+
+      // 1. Trigger instant direct browser download to the user's current device
+      const blob = new Blob([res.data], { type: 'application/zip' });
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      link.download = `SmartPower_Support_Logs_${timestamp}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+
+      setExportSuccess(`تم تنزيل حزمة التشخيص بنجاح إلى جهازك، وحفظها أيضاً على سطح المكتب في: ${filePath}`);
     } catch (err: any) {
-      setErrorMessage(err.response?.data?.message || err.message || 'فشل تصدير السجلات.');
+      setErrorMessage(err.response?.data?.message || err.message || 'فشل تصدير وتنزيل السجلات.');
     } finally {
       setIsExporting(false);
     }

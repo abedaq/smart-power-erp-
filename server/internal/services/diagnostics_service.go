@@ -169,11 +169,24 @@ func (s *DiagnosticsService) BuildDiagnosticBundle(userNote string) ([]byte, map
 	zipBuffer := new(bytes.Buffer)
 	zipWriter := zip.NewWriter(zipBuffer)
 
+	// Helper to create valid zip entry with Deflate compression and current timestamp
+	addZipFile := func(name string, data []byte) error {
+		header := &zip.FileHeader{
+			Name:     name,
+			Method:   zip.Deflate,
+			Modified: time.Now(),
+		}
+		w, err := zipWriter.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(data)
+		return err
+	}
+
 	// 1. Add system_info.json
 	sysInfoBytes, _ := json.MarshalIndent(sysInfo, "", "  ")
-	if w, err := zipWriter.Create("system_info.json"); err == nil {
-		_, _ = w.Write(sysInfoBytes)
-	}
+	_ = addZipFile("system_info.json", sysInfoBytes)
 
 	// 2. Add log files (non-exclusive reading, up to 500 lines)
 	logFiles := []string{"server.log", "postgres_engine.log", "updater.log"}
@@ -190,9 +203,7 @@ func (s *DiagnosticsService) BuildDiagnosticBundle(userNote string) ([]byte, map
 		}
 
 		sanitized := sanitizeLogs(strings.Join(lines, "\n"))
-		if w, err := zipWriter.Create(fname); err == nil {
-			_, _ = w.Write([]byte(sanitized))
-		}
+		_ = addZipFile(fname, []byte(sanitized))
 	}
 
 	if err := zipWriter.Close(); err != nil {
@@ -202,29 +213,51 @@ func (s *DiagnosticsService) BuildDiagnosticBundle(userNote string) ([]byte, map
 	return zipBuffer.Bytes(), sysInfo, nil
 }
 
-// ExportToDesktop writes the diagnostics zip file to the current user's Desktop
-func (s *DiagnosticsService) ExportToDesktop(userNote string) (string, error) {
+// ExportToDesktop writes the diagnostics zip file to the user's Desktop (and OneDrive Desktop)
+// and returns the primary file path and the raw zip bytes for browser download.
+func (s *DiagnosticsService) ExportToDesktop(userNote string) (string, []byte, error) {
 	zipData, _, err := s.BuildDiagnosticBundle(userNote)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	userProfile := os.Getenv("USERPROFILE")
 	if userProfile == "" {
 		userProfile = "."
 	}
-	desktopDir := filepath.Join(userProfile, "Desktop")
-	_ = os.MkdirAll(desktopDir, 0755)
 
 	timestamp := time.Now().Format("20060102_150405")
 	fileName := fmt.Sprintf("SmartPower_Support_Logs_%s.zip", timestamp)
-	targetPath := filepath.Join(desktopDir, fileName)
 
-	if err := os.WriteFile(targetPath, zipData, 0644); err != nil {
-		return "", fmt.Errorf("failed to write bundle to desktop: %w", err)
+	// Collect all possible visible Desktop directories (including OneDrive)
+	desktopDirs := []string{filepath.Join(userProfile, "Desktop")}
+	for _, envVar := range []string{"OneDrive", "OneDriveConsumer", "OneDriveCommercial"} {
+		if od := os.Getenv(envVar); od != "" {
+			odDesktop := filepath.Join(od, "Desktop")
+			if fi, err := os.Stat(odDesktop); err == nil && fi.IsDir() {
+				desktopDirs = append(desktopDirs, odDesktop)
+			}
+		}
 	}
 
-	return targetPath, nil
+	primaryPath := ""
+	for _, dir := range desktopDirs {
+		_ = os.MkdirAll(dir, 0755)
+		targetPath := filepath.Join(dir, fileName)
+		if err := os.WriteFile(targetPath, zipData, 0644); err == nil {
+			if primaryPath == "" {
+				primaryPath = targetPath
+			}
+			log.Printf("💾 [Diagnostics] Saved support bundle to: %s", targetPath)
+		}
+	}
+
+	if primaryPath == "" {
+		primaryPath = filepath.Join(userProfile, "Desktop", fileName)
+		_ = os.WriteFile(primaryPath, zipData, 0644)
+	}
+
+	return primaryPath, zipData, nil
 }
 
 // UploadToCloud uploads the zip bundle to Supabase Storage and records an entry in support_diagnostics

@@ -53,7 +53,7 @@ func NewWhatsAppService(db *gorm.DB, cfg *config.Config, renderService *InvoiceR
 		return nil, fmt.Errorf("failed to retrieve underlying sql.DB: %w", err)
 	}
 
-	waLogger := waLog.Stdout("WhatsApp", "INFO", true)
+	waLogger := waLog.Stdout("WhatsApp", "ERROR", true)
 	container := sqlstore.NewWithDB(sqlDB, "postgres", waLogger)
 
 	err = container.Upgrade(ctx)

@@ -5,7 +5,7 @@
 ; =====================================================================
 
 #define MyAppName "Smart Power ERP"
-#define MyAppVersion "3.4.4.0"
+#define MyAppVersion "3.4.4.1"
 #define MyAppPublisher "SmartPower Technologies"
 #define MyAppExeName "SmartPowerERP.exe"
 
