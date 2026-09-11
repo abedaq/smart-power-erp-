@@ -455,7 +455,23 @@ func main() {
 	// Define Centralized Graceful Shutdown Function
 	doShutdown := func() {
 		shutdownOnce.Do(func() {
-			log.Println("🛑 Graceful shutdown initiated. Stopping web server first...")
+			// 1. مؤقت الإعدام القسري (Watchdog) - 4 ثوانٍ لضمان عدم بقاء العملية معلقة تحت أي ظرف
+			go func() {
+				time.Sleep(4 * time.Second)
+				log.Println("⚠️ Watchdog timeout reached during shutdown. Force exiting...")
+				os.Exit(0)
+			}()
+
+			log.Println("🛑 Graceful shutdown initiated...")
+
+			// 2. تحرير قفل الـ Mutex فوراً في أول جزء من الثانية للسماح بإعادة التشغيل اللحظي
+			if mutexHandle != 0 && runtime.GOOS == "windows" {
+				procCloseHandle.Call(mutexHandle)
+				mutexHandle = 0
+				log.Println("🔓 Single instance mutex released.")
+			}
+
+			// 3. إيقاف خادم الويب وتحرير المنفذ
 			if app != nil {
 				if err := app.Shutdown(); err != nil {
 					log.Printf("⚠️ Error shutting down web server: %v", err)
@@ -464,15 +480,15 @@ func main() {
 			if cloudSyncService != nil {
 				cloudSyncService.Stop()
 			}
+
+			// 4. إيقاف محرك قاعدة البيانات وحفظ الملفات
 			log.Println("🛑 Stopping embedded database engine cleanly...")
 			if dbManager != nil {
 				if err := dbManager.Stop(); err != nil {
 					log.Printf("⚠️ Error stopping embedded database: %v", err)
 				}
 			}
-			if mutexHandle != 0 && runtime.GOOS == "windows" {
-				procCloseHandle.Call(mutexHandle)
-			}
+
 			log.Println("✅ SmartPower ERP engine cleanly stopped.")
 			if logFile != nil {
 				_ = logFile.Close()
@@ -735,7 +751,7 @@ func main() {
 	// 10. Auto-open native webview window on start
 	SafeGo("NativeWindowLauncher", func() {
 		time.Sleep(800 * time.Millisecond)
-		openNativeWindow(fmt.Sprintf("http://localhost:%s", cfg.Port), nil)
+		openNativeWindow(fmt.Sprintf("http://localhost:%s", cfg.Port), doShutdown)
 	})
 
 	// 11. Graceful Shutdown Signal Interceptor
@@ -859,9 +875,12 @@ func openNativeWindow(url string, onWindowClose func()) {
 		log.Println("⚠️ Embedded WebView2 initialization returned nil, falling back to modern browser...")
 		browserPath := findModernBrowserPath()
 		if browserPath != "" {
+			edgeProfileDir := filepath.Join(localAppData, "SmartPowerERP", "edge_profile")
+			_ = os.MkdirAll(edgeProfileDir, 0755)
+
 			cmd := exec.Command(browserPath,
 				fmt.Sprintf("--app=%s", url),
-				fmt.Sprintf("--user-data-dir=%s", profileDir),
+				fmt.Sprintf("--user-data-dir=%s", edgeProfileDir),
 				"--window-size=1440,900",
 				"--hide-crash-restore-bubble",
 				"--disable-background-mode",
@@ -871,6 +890,11 @@ func openNativeWindow(url string, onWindowClose func()) {
 			)
 			if err := cmd.Start(); err == nil {
 				log.Printf("🖥️ Launched application window via: %s (%s)", filepath.Base(browserPath), url)
+				_ = cmd.Wait()
+				log.Println("🛑 Modern browser window closed by user. Initiating backend shutdown...")
+				if onWindowClose != nil {
+					onWindowClose()
+				}
 				return
 			}
 		}
