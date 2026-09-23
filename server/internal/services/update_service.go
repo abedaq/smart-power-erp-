@@ -34,7 +34,7 @@ var (
 
 var (
 	// DefaultAppVersion represents current release version of SmartPower ERP
-	DefaultAppVersion = "3.4.5.4"
+	DefaultAppVersion = "3.4.5.5"
 	// DefaultManifestURL fallback remote version metadata endpoint
 	DefaultManifestURL = "https://pkuoytiickgbtfeffmxq.supabase.co/storage/v1/object/public/updates/version.json"
 )
@@ -93,7 +93,11 @@ type UpdateService struct {
 func NewUpdateService(cfg *config.Config, eventHub *EventHub, shutdownFn func()) *UpdateService {
 	appVer := os.Getenv("APP_VERSION")
 	if appVer == "" {
-		appVer = DefaultAppVersion
+		if config.Version != "" {
+			appVer = strings.TrimPrefix(config.Version, "v")
+		} else {
+			appVer = DefaultAppVersion
+		}
 	}
 
 	manifestURL := os.Getenv("UPDATE_MANIFEST_URL")

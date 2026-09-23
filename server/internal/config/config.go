@@ -13,6 +13,9 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// Version holds the current release version string
+var Version = "v3.4.5.5"
+
 type Config struct {
 	Port            string
 	DatabaseURL     string
