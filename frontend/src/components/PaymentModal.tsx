@@ -118,17 +118,19 @@ o سعر الكيلوواط/ ساعة ${planPrice.toLocaleString('en-US')} ري�
     if (!customer) return 0;
     const candidates = [
       (customer as any).totalDue,
-      (customer as any).total_amount,
       customer.total_due,
+      (customer as any).total_amount,
       (customer as any).dueAmount,
     ];
     for (const val of candidates) {
-      if (val !== undefined && val !== null && !Number.isNaN(Number(val)) && Number(val) > 0) {
+      if (val !== undefined && val !== null && !Number.isNaN(Number(val)) && Number(val) !== 0) {
         return Number(val);
       }
     }
-    return Number(customer.total_due ?? (customer as any).totalDue ?? 0);
-  }, [customer]);
+    const consumptionCost = computedUnits * planPrice;
+    const arrears = Number((customer as any).arrears ?? customer.arrears ?? 0);
+    return consumptionCost + planFee + arrears;
+  }, [customer, computedUnits, planPrice, planFee]);
 
   // 2. Compute previously paid amount on this invoice/customer
   const previousPaidAmount = useMemo(() => {
@@ -428,7 +430,7 @@ o سعر الكيلوواط/ ساعة ${planPrice.toLocaleString('en-US')} ري�
                               <th colSpan={2} className="border border-black py-1">قــــــراءة العداد</th>
                               <th rowSpan={2} className="border border-black py-1">الفارق</th>
                               <th rowSpan={2} className="border border-black py-1">متأخرات</th>
-                              <th rowSpan={2} className="border border-black py-1">المتبقي</th>
+                              <th rowSpan={2} className="border border-black py-1">الاجمالي</th>
                             </tr>
                             <tr className="bg-white font-black border-b-2 border-black">
                               <th className="border border-black py-0.5">ق.السابقة</th>
@@ -441,9 +443,9 @@ o سعر الكيلوواط/ ساعة ${planPrice.toLocaleString('en-US')} ري�
                               <td className="border border-black py-1 font-mono">{Number(updatedComputedRow.currReading || 0) > 0 ? Number(updatedComputedRow.currReading).toLocaleString('en-US') : ''}</td>
                               <td className="border border-black py-1 font-mono">{Number(updatedComputedRow.units || 0) > 0 ? Number(updatedComputedRow.units).toLocaleString('en-US') : ''}</td>
                               <td className="border border-black py-1 font-mono">{Number(updatedComputedRow.arrears || 0) > 0 ? Number(updatedComputedRow.arrears).toLocaleString('en-US') : ''}</td>
-                              <td className="border border-black py-1 font-mono text-rose-700 font-extrabold">
-                                {updatedComputedRow.remaining !== 0 
-                                  ? (updatedComputedRow.remaining > 0 ? Number(updatedComputedRow.remaining).toLocaleString('en-US') : `-${Math.abs(Number(updatedComputedRow.remaining)).toLocaleString('en-US')}`) 
+                              <td className="border border-black py-1 font-mono text-black font-extrabold">
+                                {Number(updatedComputedRow.totalDue || 0) !== 0 
+                                  ? (Number(updatedComputedRow.totalDue) > 0 ? Number(updatedComputedRow.totalDue).toLocaleString('en-US') : `-${Math.abs(Number(updatedComputedRow.totalDue)).toLocaleString('en-US')}`) 
                                   : ''}
                               </td>
                             </tr>
@@ -453,12 +455,16 @@ o سعر الكيلوواط/ ساعة ${planPrice.toLocaleString('en-US')} ري�
                         {/* Financial Snapshot */}
                         <div className="bg-slate-100 border border-black p-1.5 text-[9px] font-black space-y-0.5">
                           <div className="flex justify-between">
-                            <span>المبلغ المسدد:</span>
-                            <span className="font-mono text-emerald-800">{Number(updatedComputedRow.paidAmount || 0).toLocaleString('en-US')} ر.ي</span>
+                            <span>إجمالي المستحق:</span>
+                            <span className="font-mono text-black font-black">{Number(updatedComputedRow.totalDue || 0).toLocaleString('en-US')} ر.ي</span>
                           </div>
                           <div className="flex justify-between">
-                            <span>{updatedComputedRow.remaining < 0 ? 'الرصيد الدائن:' : 'المتبقي بعد السداد:'}</span>
-                            <span className={`font-mono ${updatedComputedRow.remaining < 0 ? 'text-emerald-800 font-black' : 'text-rose-800'}`}>
+                            <span>المبلغ المسدد:</span>
+                            <span className="font-mono text-emerald-800 font-black">{Number(updatedComputedRow.paidAmount || 0).toLocaleString('en-US')} ر.ي</span>
+                          </div>
+                          <div className="flex justify-between border-t border-black/30 pt-0.5">
+                            <span>{updatedComputedRow.remaining < 0 ? 'الرصيد الدائن (فائض):' : 'المتبقي بعد السداد:'}</span>
+                            <span className={`font-mono ${updatedComputedRow.remaining < 0 ? 'text-emerald-800 font-black' : 'text-rose-800 font-black'}`}>
                               {updatedComputedRow.remaining < 0 
                                 ? `-${Math.abs(Number(updatedComputedRow.remaining)).toLocaleString('en-US')} ر.ي`
                                 : `${Number(updatedComputedRow.remaining || 0).toLocaleString('en-US')} ر.ي`}
@@ -545,17 +551,16 @@ o سعر الكيلوواط/ ساعة ${planPrice.toLocaleString('en-US')} ري�
                           )}
                         </div>
 
-                        {/* Table (8 Columns) */}
+                        {/* Table (7 Columns) */}
                         <table className="w-full border-collapse text-center text-[10px] border-2 border-black mb-2">
                           <thead>
                             <tr className="bg-white font-black border-b-2 border-black">
                               <th colSpan={2} className="border border-black py-1">قــــــراءة العداد</th>
                               <th rowSpan={2} className="border border-black py-1">الفارق</th>
                               <th rowSpan={2} className="border border-black py-1">اشتراك</th>
-                              <th rowSpan={2} className="border border-black py-1">متأخرات</th>
                               <th rowSpan={2} className="border border-black py-1">القيمـة</th>
-                              <th rowSpan={2} className="border border-black py-1">المدفوع</th>
-                              <th rowSpan={2} className="border border-black py-1">المتبقي</th>
+                              <th rowSpan={2} className="border border-black py-1">متأخرات</th>
+                              <th rowSpan={2} className="border border-black py-1">الاجمالي</th>
                             </tr>
                             <tr className="bg-white font-black border-b-2 border-black">
                               <th className="border border-black py-0.5">ق. السابقة</th>
@@ -568,19 +573,42 @@ o سعر الكيلوواط/ ساعة ${planPrice.toLocaleString('en-US')} ري�
                               <td className="border border-black py-1 font-mono">{Number(updatedComputedRow.currReading || 0) > 0 ? Number(updatedComputedRow.currReading).toLocaleString('en-US') : ''}</td>
                               <td className="border border-black py-1 font-mono">{Number(updatedComputedRow.units || 0) > 0 ? Number(updatedComputedRow.units).toLocaleString('en-US') : ''}</td>
                               <td className="border border-black py-1 font-mono">{Number(updatedComputedRow.serviceFee || 0) > 0 ? Number(updatedComputedRow.serviceFee).toLocaleString('en-US') : ''}</td>
-                              <td className="border border-black py-1 font-mono">{Number(updatedComputedRow.arrears || 0) > 0 ? Number(updatedComputedRow.arrears).toLocaleString('en-US') : ''}</td>
                               <td className="border border-black py-1 font-mono">{Number(updatedComputedRow.consumptionCost || 0) > 0 ? Number(updatedComputedRow.consumptionCost).toLocaleString('en-US') : ''}</td>
-                              <td className="border border-black py-1 font-mono text-emerald-800 font-extrabold">{Number(updatedComputedRow.paidAmount || 0) > 0 ? Number(updatedComputedRow.paidAmount).toLocaleString('en-US') : ''}</td>
-                              <td className={`border border-black py-1 font-mono font-extrabold ${updatedComputedRow.remaining < 0 ? 'text-emerald-800' : 'text-rose-800'}`}>
-                                {updatedComputedRow.remaining !== 0
-                                  ? (updatedComputedRow.remaining > 0
-                                      ? Number(updatedComputedRow.remaining).toLocaleString('en-US')
-                                      : `-${Math.abs(Number(updatedComputedRow.remaining)).toLocaleString('en-US')}`)
+                              <td className="border border-black py-1 font-mono">{Number(updatedComputedRow.arrears || 0) > 0 ? Number(updatedComputedRow.arrears).toLocaleString('en-US') : ''}</td>
+                              <td className="border border-black py-1 font-mono text-black font-extrabold">
+                                {Number(updatedComputedRow.totalDue || 0) !== 0 
+                                  ? (Number(updatedComputedRow.totalDue) > 0 ? Number(updatedComputedRow.totalDue).toLocaleString('en-US') : `-${Math.abs(Number(updatedComputedRow.totalDue)).toLocaleString('en-US')}`) 
                                   : ''}
                               </td>
                             </tr>
                           </tbody>
                         </table>
+
+                        {/* Financial Settlement Breakdown Card in Main Invoice */}
+                        <div className="border-2 border-black bg-slate-50 p-1.5 rounded mb-2 text-[10px] font-black">
+                          <div className="grid grid-cols-3 gap-1 text-center">
+                            <div className="border-l border-black pl-1">
+                              <span className="text-slate-700 block text-[9px]">إجمالي المستحق</span>
+                              <span className="font-mono text-black text-[11px] font-black">{Number(updatedComputedRow.totalDue || 0).toLocaleString('en-US')} ر.ي</span>
+                            </div>
+                            <div className="border-l border-black pl-1">
+                              <span className="text-emerald-800 block text-[9px]">المبلغ المسدد</span>
+                              <span className="font-mono text-emerald-700 text-[11px] font-black">{Number(updatedComputedRow.paidAmount || 0).toLocaleString('en-US')} ر.ي</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-700 block text-[9px]">
+                                {updatedComputedRow.remaining < 0 ? 'الرصيد الدائن (فائض)' : 'الرصيد المتبقي'}
+                              </span>
+                              <span className={`font-mono text-[11px] font-black ${updatedComputedRow.remaining > 0 ? 'text-red-700' : 'text-emerald-700 font-extrabold'}`}>
+                                {updatedComputedRow.remaining > 0
+                                  ? `+${Number(updatedComputedRow.remaining).toLocaleString('en-US')} ر.ي (متبقي عليك)`
+                                  : updatedComputedRow.remaining < 0
+                                  ? `-${Math.abs(Number(updatedComputedRow.remaining)).toLocaleString('en-US')} ر.ي (دائن لك ✅)`
+                                  : '0 ر.ي (مسدد بالكامل ✅)'}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
 
                         {/* Red Policy Lines */}
                         <div className="text-red-600 text-[10px] font-black space-y-0.5 my-2 leading-tight pr-1">
