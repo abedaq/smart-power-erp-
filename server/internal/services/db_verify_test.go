@@ -1,6 +1,7 @@
 package services
 
 import (
+	"os"
 	"testing"
 
 	"smartpower/internal/config"
@@ -37,10 +38,33 @@ func TestVerifyDatabaseCleanup(t *testing.T) {
 	t.Logf("Last customer: ID=%d, Name=%s, SubNo=%s", allCusts[len(allCusts)-1].ID, allCusts[len(allCusts)-1].FullName, allCusts[len(allCusts)-1].SubscriberNumber)
 	t.Logf("Total loaded: %d", len(allCusts))
 
-	// Check if there are any dummy names like مشترك 9...
 	for _, c := range allCusts {
 		if c.ID >= 500 {
 			t.Errorf("Dummy ID >= 500 found: ID=%d, Name=%s", c.ID, c.FullName)
 		}
 	}
 }
+
+func TestExportCycleExcelOutput(t *testing.T) {
+	cfg := config.LoadConfig()
+	_, err := database.InitDB(cfg)
+	if err != nil {
+		t.Fatalf("Failed to connect to database: %v", err)
+	}
+
+	readingService := NewReadingService()
+	billingService := NewBillingService()
+	excelService := NewExcelService(readingService, billingService)
+
+	data, err := excelService.ExportCycleExcel("سبتمبر 1")
+	if err != nil {
+		t.Fatalf("Failed to export cycle excel: %v", err)
+	}
+
+	testFile := "test_cycle_export.xlsx"
+	if err := os.WriteFile(testFile, data, 0644); err != nil {
+		t.Fatalf("Failed to save test excel file: %v", err)
+	}
+	t.Logf("Successfully exported %d bytes to %s", len(data), testFile)
+}
+

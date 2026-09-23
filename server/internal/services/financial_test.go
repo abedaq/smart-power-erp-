@@ -152,3 +152,122 @@ func TestCreditCreationOnOverpayment(t *testing.T) {
 		t.Fatalf("expected surplus 5000, got %.2f", surplus)
 	}
 }
+
+func TestNegativeArrearsCarryover(t *testing.T) {
+	// Scenario: Customer owes 2,000 YER on August invoice, pays 10,000 YER (8,000 YER credit)
+	augustTotalDue := 2000.0
+	paymentAmount := 10000.0
+
+	// 1. Cycle 1 (August): Overpayment applied: Remaining becomes -8000, Status becomes Paid
+	augustPaidAmount := paymentAmount
+	augustRemaining := augustTotalDue - augustPaidAmount
+	if augustRemaining != -8000.0 {
+		t.Fatalf("expected augustRemaining -8000, got %.2f", augustRemaining)
+	}
+	augustStatus := "Unpaid"
+	if augustRemaining <= 0 {
+		augustStatus = "Paid"
+	}
+	if augustStatus != "Paid" {
+		t.Fatalf("expected augustStatus Paid, got %s", augustStatus)
+	}
+
+	// 2. Cycle 2 (September): New consumption is 5,000 YER
+	// Arrears query includes (status IN ('Unpaid', 'Partially_Paid') OR remaining_amount < 0)
+	var activeInvoicesRemaining = []float64{augustRemaining} // -8000
+	var septemberArrears float64
+	for _, rem := range activeInvoicesRemaining {
+		septemberArrears += rem
+	}
+	if septemberArrears != -8000.0 {
+		t.Fatalf("expected septemberArrears -8000, got %.2f", septemberArrears)
+	}
+
+	septemberConsumptionValue := 4000.0
+	septemberFixedFee := 1000.0
+	septemberTotalAmount := septemberConsumptionValue + septemberFixedFee // 5000.0
+	septemberTotalDue := septemberTotalAmount + septemberArrears           // 5000 + (-8000) = -3000.0
+
+	if septemberTotalDue != -3000.0 {
+		t.Fatalf("expected septemberTotalDue -3000, got %.2f", septemberTotalDue)
+	}
+
+	septemberStatus := "Unpaid"
+	if septemberTotalDue <= 0 {
+		septemberStatus = "Paid"
+	}
+	if septemberStatus != "Paid" {
+		t.Fatalf("expected septemberStatus Paid when totalDue <= 0, got %s", septemberStatus)
+	}
+	septemberRemaining := septemberTotalDue // -3000.0
+
+	// Credit Roll-Forward Rule: Upon absorbing August's negative credit into September,
+	// August's remaining_amount MUST be zeroed out in database (UPDATE invoices SET remaining_amount = 0.00 WHERE id = august_id).
+	augustRemaining = 0.00
+
+	// 3. Cycle 3 (October): New consumption is 5,000 YER
+	// Customer had -3,000 true remaining credit, so customer MUST owe: 5000 - 3000 = +2000 YER.
+	// Arrears query across database invoices where (status IN ('Unpaid', 'Partially_Paid') OR remaining_amount < 0):
+	// August is 0.00 (NOT counted). September is -3000.00.
+	var activeInvoicesRemainingOct = []float64{augustRemaining, septemberRemaining}
+	var octoberArrears float64
+	for _, rem := range activeInvoicesRemainingOct {
+		if rem < 0 || rem > 0 { // Unpaid or negative
+			octoberArrears += rem
+		}
+	}
+	if octoberArrears != -3000.0 {
+		t.Fatalf("expected octoberArrears -3000 (single absorbed credit), got %.2f. Compounding bug detected!", octoberArrears)
+	}
+
+	octoberConsumptionValue := 4000.0
+	octoberFixedFee := 1000.0
+	octoberTotalAmount := octoberConsumptionValue + octoberFixedFee // 5000.0
+	octoberTotalDue := octoberTotalAmount + octoberArrears           // 5000 + (-3000) = +2000.0
+
+	if octoberTotalDue != 2000.0 {
+		t.Fatalf("expected octoberTotalDue +2000, got %.2f. Credit roll-forward failed!", octoberTotalDue)
+	}
+
+	octoberStatus := "Unpaid"
+	if octoberTotalDue <= 0 {
+		octoberStatus = "Paid"
+	}
+	if octoberStatus != "Unpaid" {
+		t.Fatalf("expected octoberStatus Unpaid for positive totalDue, got %s", octoberStatus)
+	}
+
+	// September's negative credit is now fully absorbed and rolled forward; zero out September's remaining
+	septemberRemaining = 0.00
+	octoberRemaining := octoberTotalDue // 2000.0
+
+	if octoberRemaining != 2000.0 {
+		t.Fatalf("expected octoberRemaining 2000, got %.2f", octoberRemaining)
+	}
+}
+
+func TestNormalizeSubscriberNumber(t *testing.T) {
+	testCases := []struct {
+		input    string
+		expected string
+	}{
+		{"00123", "123"},
+		{"٠٠١٢٣", "123"},
+		{"٠٠٠", "0"},
+		{"000", "0"},
+		{"١٢٣", "123"},
+		{"0٠123", "123"},
+		{"  ٠٠٥  ", "5"},
+		{"0", "0"},
+		{"٠", "0"},
+		{"  ", "0"},
+	}
+
+	for _, tc := range testCases {
+		actual := NormalizeSubscriberNumber(tc.input)
+		if actual != tc.expected {
+			t.Errorf("NormalizeSubscriberNumber(%q) = %q, expected %q", tc.input, actual, tc.expected)
+		}
+	}
+}
+

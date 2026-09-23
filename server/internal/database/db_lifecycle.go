@@ -217,6 +217,31 @@ func (m *DBLifecycleManager) cleanStalePID() {
 	}
 }
 
+func (m *DBLifecycleManager) ensureLoggingCollector() {
+	confPath := filepath.Join(m.DataDir, "postgresql.conf")
+	data, err := os.ReadFile(confPath)
+	if err != nil {
+		return
+	}
+	content := string(data)
+	if !strings.Contains(content, "SmartPower 24/7 Automated Log Collector") {
+		settings := "\n# --- SmartPower 24/7 Automated Log Collector & Circular Rotation ---\n" +
+			"logging_collector = on\n" +
+			"log_directory = 'log'\n" +
+			"log_filename = 'pg-%a.log'\n" +
+			"log_truncate_on_rotation = on\n" +
+			"log_rotation_age = 1d\n" +
+			"log_rotation_size = 10MB\n" +
+			"log_min_messages = warning\n" +
+			"log_statement = 'none'\n"
+		f, err := os.OpenFile(confPath, os.O_APPEND|os.O_WRONLY, 0644)
+		if err == nil {
+			_, _ = f.WriteString(settings)
+			_ = f.Close()
+		}
+	}
+}
+
 func (m *DBLifecycleManager) startPostgres() error {
 	dsn := fmt.Sprintf("postgres://postgres:postgres@127.0.0.1:%d/postgres?sslmode=disable", m.Port)
 	if db, err := sql.Open("pgx", dsn); err == nil {
@@ -231,15 +256,27 @@ func (m *DBLifecycleManager) startPostgres() error {
 		db.Close()
 	}
 
-	pgCtl := filepath.Join(m.PgBinDir, "pg_ctl.exe")
-	logFile := filepath.Join(m.DataDir, "postgres_engine.log")
+	// 1. Ensure log directory exists for PostgreSQL internal logging collector
+	logDir := filepath.Join(m.DataDir, "log")
+	_ = os.MkdirAll(logDir, 0755)
 
+	// 2. Ensure circular log rotation settings in postgresql.conf
+	m.ensureLoggingCollector()
+
+	// 3. Clean up legacy root-level log files if present
+	legacyLog := filepath.Join(m.DataDir, "postgres_engine.log")
+	legacyLogOld := filepath.Join(m.DataDir, "postgres_engine.log.old")
+	_ = os.Remove(legacyLogOld)
+	if fi, err := os.Stat(legacyLog); err == nil && fi.Size() >= 10*1024*1024 {
+		_ = os.Remove(legacyLog)
+	}
+
+	pgCtl := filepath.Join(m.PgBinDir, "pg_ctl.exe")
 	cmd := exec.Command(pgCtl,
 		"-D", m.DataDir,
-		"-l", logFile,
 		"-o", fmt.Sprintf("-p %d -h 127.0.0.1", m.Port),
 		"-w",
-		"-t", "20",
+		"-t", "60",
 		"start",
 	)
 	cmd.Dir = m.PgBinDir

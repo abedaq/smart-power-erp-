@@ -82,17 +82,15 @@ func acquireSingleInstanceMutex() (uintptr, error) {
 		return 0, nil
 	}
 
-	// 1. If port 3000 is listening and responds, an actual instance is actively running
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:3000", 300*time.Millisecond)
-	if err == nil {
-		conn.Close()
-		return 0, fmt.Errorf("ALREADY_RUNNING")
-	}
-
 	mutexName, _ := syscall.UTF16PtrFromString("Local\\SmartPowerERP_SingleInstance_Mutex")
 	handle, _, errCall := procCreateMutexW.Call(0, 1, uintptr(unsafe.Pointer(mutexName)))
 	if handle == 0 {
 		return 0, fmt.Errorf("failed to create mutex: %v", errCall)
+	}
+
+	// If mutex already existed, another instance is actively running
+	if errno, ok := errCall.(syscall.Errno); ok && errno == ERROR_ALREADY_EXISTS {
+		return handle, fmt.Errorf("ALREADY_RUNNING")
 	}
 
 	return handle, nil
@@ -418,6 +416,16 @@ func main() {
 	// 4.3 Initialize Diagnostics & Support Service
 	diagnosticsService := services.NewDiagnosticsService(cfg)
 
+	// 4.4 Initialize Streaming Backup & Remote Command Worker
+	rawSQLDB, _ := db.DB()
+	streamingBackupService := services.NewStreamingBackupService(cfg, rawSQLDB)
+	remoteCommandWorker, rcErr := services.NewRemoteCommandWorker(cfg, rawSQLDB, streamingBackupService)
+	if rcErr != nil {
+		log.Printf("⚠️ Warning initializing Remote Command Worker: %v", rcErr)
+	} else {
+		remoteCommandWorker.Start()
+	}
+
 	// 5. Initialize Handlers
 	h := handlers.NewHandlers(
 		authService,
@@ -433,6 +441,10 @@ func main() {
 		eventHub,
 	)
 	h.SetDiagnosticsService(diagnosticsService)
+	h.SetStreamingBackupService(streamingBackupService)
+	if remoteCommandWorker != nil {
+		h.SetRemoteCommandWorker(remoteCommandWorker)
+	}
 
 	// 6. Setup Fiber Web Application
 	app := fiber.New(fiber.Config{
@@ -451,7 +463,32 @@ func main() {
 	}))
 	app.Use(logger.New())
 	app.Use(cors.New(cors.Config{
-		AllowOrigins: "*",
+		AllowOriginsFunc: func(origin string) bool {
+			// 1. السماح للطلبات بدون ترويسة Origin (النافذة المضمنة، WebView2، Electron، أدوات النظام الداخلية)
+			if origin == "" {
+				return true
+			}
+			lower := strings.ToLower(origin)
+			// 2. السماح للمضيف المحلي localhost و 127.0.0.1 بكافة المنافذ (بيئة التطوير والإنتاج)
+			if strings.HasPrefix(lower, "http://localhost") || strings.HasPrefix(lower, "https://localhost") ||
+				strings.HasPrefix(lower, "http://127.0.0.1") || strings.HasPrefix(lower, "https://127.0.0.1") {
+				return true
+			}
+			// 3. السماح لأجهزة الكاشيرات والمحصلين عبر نطاقات الشبكة المحلية الخاصة المعتمدة عالمياً (RFC 1918)
+			if strings.HasPrefix(lower, "http://192.168.") || strings.HasPrefix(lower, "https://192.168.") ||
+				strings.HasPrefix(lower, "http://10.") || strings.HasPrefix(lower, "https://10.") {
+				return true
+			}
+			for i := 16; i <= 31; i++ {
+				prefixHttp := fmt.Sprintf("http://172.%d.", i)
+				prefixHttps := fmt.Sprintf("https://172.%d.", i)
+				if strings.HasPrefix(lower, prefixHttp) || strings.HasPrefix(lower, prefixHttps) {
+					return true
+				}
+			}
+			// رفض أي نطاق إنترنت خارجي لحماية الخادم المحلي من هجمات Cross-Origin CSRF
+			return false
+		},
 		AllowHeaders: "Origin, Content-Type, Accept, Authorization",
 		AllowMethods: "GET, POST, PUT, DELETE, OPTIONS",
 	}))
@@ -459,23 +496,16 @@ func main() {
 	// Define Centralized Graceful Shutdown Function
 	doShutdown := func() {
 		shutdownOnce.Do(func() {
-			// 1. مؤقت الإعدام القسري (Watchdog) - 4 ثوانٍ لضمان عدم بقاء العملية معلقة تحت أي ظرف
+			// 1. مؤقت الإعدام القسري (Watchdog) - 6 ثوانٍ لضمان عدم بقاء العملية معلقة تحت أي ظرف
 			go func() {
-				time.Sleep(4 * time.Second)
+				time.Sleep(6 * time.Second)
 				log.Println("⚠️ Watchdog timeout reached during shutdown. Force exiting...")
 				os.Exit(0)
 			}()
 
 			log.Println("🛑 Graceful shutdown initiated...")
 
-			// 2. تحرير قفل الـ Mutex فوراً في أول جزء من الثانية للسماح بإعادة التشغيل اللحظي
-			if mutexHandle != 0 && runtime.GOOS == "windows" {
-				procCloseHandle.Call(mutexHandle)
-				mutexHandle = 0
-				log.Println("🔓 Single instance mutex released.")
-			}
-
-			// 3. إيقاف خادم الويب وتحرير المنفذ
+			// 2. إيقاف خادم الويب أولاً لمنع استقبال أي طلبات جديدة
 			if app != nil {
 				if err := app.Shutdown(); err != nil {
 					log.Printf("⚠️ Error shutting down web server: %v", err)
@@ -484,13 +514,23 @@ func main() {
 			if cloudSyncService != nil {
 				cloudSyncService.Stop()
 			}
+			if remoteCommandWorker != nil {
+				remoteCommandWorker.Stop()
+			}
 
-			// 4. إيقاف محرك قاعدة البيانات وحفظ الملفات
+			// 3. إيقاف محرك قاعدة البيانات وحفظ الملفات بالكامل
 			log.Println("🛑 Stopping embedded database engine cleanly...")
 			if dbManager != nil {
 				if err := dbManager.Stop(); err != nil {
 					log.Printf("⚠️ Error stopping embedded database: %v", err)
 				}
+			}
+
+			// 4. تحرير قفل الـ Mutex بعد التأكد التام من إغلاق قاعدة البيانات
+			if mutexHandle != 0 && runtime.GOOS == "windows" {
+				procCloseHandle.Call(mutexHandle)
+				mutexHandle = 0
+				log.Println("🔓 Single instance mutex cleanly released.")
 			}
 
 			log.Println("✅ SmartPower ERP engine cleanly stopped.")
@@ -509,12 +549,12 @@ func main() {
 	api.Get("/realtime/stream", h.StreamEvents)
 	api.Get("/events", h.StreamEvents)
 
-	// Auto-Update Engine routes
+	// Auto-Update Engine routes (Admin Only)
 	api.Get("/system/check-updates", h.CheckUpdates)
 	api.Get("/system/update-status", h.GetUpdateStatus)
-	api.Post("/system/download-update", h.DownloadUpdate)
-	api.Post("/system/apply-update", h.ApplyUpdate)
-	api.Post("/system/update-ui", middleware.AuthRequired(authService), h.UpdateUI)
+	api.Post("/system/download-update", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.DownloadUpdate)
+	api.Post("/system/apply-update", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.ApplyUpdate)
+	api.Post("/system/update-ui", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.UpdateUI)
 
 	// Cloud Sync endpoints
 	api.Get("/system/sync-status", func(c *fiber.Ctx) error {
@@ -525,47 +565,49 @@ func main() {
 		return c.JSON(fiber.Map{"status": "triggered", "message": "Cloud sync triggered"})
 	})
 
-	// System Shutdown & Lifecycle
-	api.Post("/system/shutdown", func(c *fiber.Ctx) error {
-		log.Println("🛑 Shutdown requested via POST /api/system/shutdown")
+	// System Shutdown & Lifecycle (Loopback & Admin Only to prevent Network DoS)
+	shutdownHandler := func(c *fiber.Ctx) error {
+		clientIP := c.IP()
+		if clientIP != "127.0.0.1" && clientIP != "::1" && clientIP != "localhost" {
+			log.Printf("⚠️ Unauthorized remote shutdown attempt blocked from IP: %s", clientIP)
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error":   "Forbidden",
+				"message": "لا يمكن إيقاف خادم النظام إلا من خلال الجهاز الرئيسي محلياً (Loopback Only)",
+			})
+		}
+		log.Printf("🛑 Shutdown requested locally via %s %s from IP %s", c.Method(), c.Path(), clientIP)
 		SafeGo("APIShutdown", func() {
 			time.Sleep(150 * time.Millisecond)
 			doShutdown()
 		})
 		return c.JSON(fiber.Map{"status": "ok", "message": "SmartPower ERP server is shutting down..."})
-	})
-	api.Get("/system/shutdown", func(c *fiber.Ctx) error {
-		log.Println("🛑 Shutdown requested via GET /api/system/shutdown")
-		SafeGo("APIShutdown", func() {
-			time.Sleep(150 * time.Millisecond)
-			doShutdown()
-		})
-		return c.JSON(fiber.Map{"status": "ok", "message": "SmartPower ERP server is shutting down..."})
-	})
+	}
+	api.Post("/system/shutdown", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), shutdownHandler)
+	api.Get("/system/shutdown", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), shutdownHandler)
 
 	// System & Network Info
 	api.Get("/system/network-info", h.GetNetworkInfo)
 	api.Post("/system/diagnostics/upload", h.UploadDiagnostics)
 	api.Post("/system/diagnostics/export", h.ExportDiagnostics)
 
-	// License routes (Public for activation & check)
+	// License routes (Public for activation & check, Admin for emergency code)
 	api.Get("/license/status", h.GetLicenseStatus)
 	api.Get("/license/hwid", h.GetMachineHWID)
 	api.Post("/license/activate", h.ActivateLicense)
-	api.Post("/license/emergency-code", h.ActivateEmergencyCode)
+	api.Post("/license/emergency-code", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.ActivateEmergencyCode)
 
 	// Auth routes
 	api.Post("/auth/login", h.Login)
 	api.Get("/auth/me", middleware.AuthRequired(authService), h.GetMe)
 
-	// User management & Audit Logs
-	api.Get("/users", middleware.AuthRequired(authService), h.GetUsers)
-	api.Post("/users", middleware.AuthRequired(authService), h.CreateUser)
-	api.Put("/users/:id", middleware.AuthRequired(authService), h.UpdateUser)
-	api.Post("/users/:id/reset-password", middleware.AuthRequired(authService), h.ResetUserPassword)
-	api.Get("/audit", h.GetAuditLogs)
-	api.Get("/audit/logs", h.GetAuditLogs)
-	api.Get("/audit-logs", h.GetAuditLogs)
+	// User management & Audit Logs (Admin Only)
+	api.Get("/users", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.GetUsers)
+	api.Post("/users", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.CreateUser)
+	api.Put("/users/:id", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.UpdateUser)
+	api.Post("/users/:id/reset-password", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.ResetUserPassword)
+	api.Get("/audit", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.GetAuditLogs)
+	api.Get("/audit/logs", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.GetAuditLogs)
+	api.Get("/audit-logs", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.GetAuditLogs)
 	api.Post("/audit/activity", middleware.AuthRequired(authService), h.LogActivity)
 
 	// Customer routes
@@ -601,7 +643,7 @@ func main() {
 	api.Post("/payments", middleware.AuthRequired(authService), h.CreatePayment)
 	api.Post("/payments/:id/send-whatsapp", middleware.AuthRequired(authService), h.SendPaymentWhatsApp)
 	api.Post("/payments/approve/:id", middleware.AuthRequired(authService), h.ApprovePayment)
-	api.Post("/payments/reject/:id", middleware.AuthRequired(authService), h.RejectPayment)
+	api.Post("/payments/:id/reverse", middleware.AuthRequired(authService), h.ReversePayment)
 
 	// Invoices & Billing routes
 	api.Get("/invoices", h.GetInvoices)
@@ -613,27 +655,27 @@ func main() {
 
 	// Settings & Plans
 	api.Get("/settings", h.GetSettings)
-	api.Put("/settings", middleware.AuthRequired(authService), h.UpdateSettings)
+	api.Put("/settings", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.UpdateSettings)
 	api.Get("/plans", h.GetPlans)
 
 	// WhatsApp Gateway routes
 	api.Get("/whatsapp/status", h.GetWhatsAppStatus)
-	api.Get("/whatsapp/messages", h.GetWhatsAppMessages)
-	api.Get("/whatsapp/stream", h.GetWhatsAppMessages)
+	api.Get("/whatsapp/messages", middleware.AuthRequired(authService), h.GetWhatsAppMessages)
+	api.Get("/whatsapp/stream", middleware.AuthRequired(authService), h.GetWhatsAppMessages)
 	api.Post("/whatsapp/send-test", middleware.AuthRequired(authService), h.SendTestWhatsApp)
-	api.Post("/whatsapp/restart", h.RestartWhatsApp)
-	api.Post("/whatsapp/logout", h.LogoutWhatsApp)
-	api.Post("/whatsapp/connect", h.ConnectWhatsApp)
+	api.Post("/whatsapp/restart", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.RestartWhatsApp)
+	api.Post("/whatsapp/logout", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.LogoutWhatsApp)
+	api.Post("/whatsapp/connect", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.ConnectWhatsApp)
 	api.Post("/whatsapp/send-invoice", middleware.AuthRequired(authService), h.SendInvoiceWhatsApp)
 	api.Post("/whatsapp/send-warning", middleware.AuthRequired(authService), h.SendWarningWhatsApp)
 	api.Post("/whatsapp/send-bulk-warnings", middleware.AuthRequired(authService), h.SendBulkWarningsWhatsApp)
-	api.Delete("/whatsapp/queue/pending", h.ClearPendingWhatsAppQueue)
-	api.Post("/whatsapp/queue/clear", h.ClearPendingWhatsAppQueue)
-	api.Delete("/whatsapp/queue", h.ClearPendingWhatsAppQueue)
-	api.Post("/whatsapp/queue/retry-all", h.RetryAllWhatsAppQueue)
-	api.Delete("/whatsapp/messages/:id", h.DeleteWhatsAppMessage)
-	api.Post("/whatsapp/messages/:id/retry", h.RetryWhatsAppMessage)
-	api.Delete("/whatsapp/messages", h.ClearAllWhatsAppMessages)
+	api.Delete("/whatsapp/queue/pending", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.ClearPendingWhatsAppQueue)
+	api.Post("/whatsapp/queue/clear", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.ClearPendingWhatsAppQueue)
+	api.Delete("/whatsapp/queue", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.ClearPendingWhatsAppQueue)
+	api.Post("/whatsapp/queue/retry-all", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.RetryAllWhatsAppQueue)
+	api.Delete("/whatsapp/messages/:id", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.DeleteWhatsAppMessage)
+	api.Post("/whatsapp/messages/:id/retry", middleware.AuthRequired(authService), h.RetryWhatsAppMessage)
+	api.Delete("/whatsapp/messages", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.ClearAllWhatsAppMessages)
 
 	// Analytics routes
 	api.Get("/analytics/monthly-performance", h.GetMonthlyPerformance)
@@ -648,7 +690,9 @@ func main() {
 	api.Get("/export/billing-cycle/:id", h.ExportCycleExcel)
 
 	// Backup trigger
-	api.Post("/backup/now", middleware.AuthRequired(authService), h.TriggerBackup)
+	api.Post("/backup/now", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.TriggerBackup)
+	api.Post("/backup/cloud", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.UploadCloudBackup)
+	api.Post("/remote-command/trigger", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.TriggerRemoteCommandCheck)
 
 	// 8. Dynamic UI Overlay & Embedded Frontend Distribution
 	localAppData := os.Getenv("LOCALAPPDATA")
@@ -769,13 +813,35 @@ func main() {
 		doShutdown()
 	})
 
-	// 12. Start Server Listener (LAN & Localhost)
+	// 12. Start Server Listener (LAN & Localhost) with Resilience & Auto-Recovery
 	cleanPort := strings.TrimPrefix(cfg.Port, ":")
 	addr := fmt.Sprintf("0.0.0.0:%s", cleanPort)
 	log.Printf("🌐 Server listening on http://%s (Localhost & LAN Mobile Access)", addr)
-	if err := app.Listen(addr); err != nil {
-		errMsg := fmt.Sprintf("فشل تشغيل خادم الويب على المنفذ %s:\n%v\n\nقد يكون المنفذ مستخدماً من قبل برنامج آخر.", cleanPort, err)
-		log.Printf("❌ Server listen error: %v", err)
+
+	var ln net.Listener
+	var listenErr error
+	for attempt := 1; attempt <= 4; attempt++ {
+		ln, listenErr = net.Listen("tcp", addr)
+		if listenErr == nil {
+			break
+		}
+		log.Printf("⚠️ Port %s busy on attempt %d/4 (%v). Attempting cleanup and retry...", cleanPort, attempt, listenErr)
+		if runtime.GOOS == "windows" {
+			exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-NonInteractive", "-Command",
+				fmt.Sprintf("Get-NetTCPConnection -LocalPort %s -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }", cleanPort),
+			).Run()
+		}
+		time.Sleep(1 * time.Second)
+	}
+
+	if ln != nil {
+		if err := app.Listener(ln); err != nil {
+			log.Printf("❌ Server listener closed: %v", err)
+			doShutdown()
+		}
+	} else {
+		errMsg := fmt.Sprintf("فشل تشغيل خادم الويب على المنفذ %s:\n%v\n\nقد يكون المنفذ مستخدماً من قبل برنامج آخر.", cleanPort, listenErr)
+		log.Printf("❌ Server listen error after retries: %v", listenErr)
 		showFatalMessageBox("SmartPower ERP - خطأ في تشغيل السيرفر", errMsg)
 		doShutdown()
 	}

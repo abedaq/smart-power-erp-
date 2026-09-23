@@ -4,9 +4,13 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"html"
+	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"smartpower/internal/config"
@@ -18,8 +22,12 @@ import (
 )
 
 type InvoiceRenderService struct {
-	cfg *config.Config
-	db  *gorm.DB
+	cfg         *config.Config
+	db          *gorm.DB
+	renderMu    sync.Mutex
+	allocCtx    context.Context
+	cancelAlloc context.CancelFunc
+	idleTimer   *time.Timer
 }
 
 func NewInvoiceRenderService(cfg *config.Config) *InvoiceRenderService {
@@ -86,6 +94,129 @@ func formatMoney(v float64) string {
 	return out
 }
 
+func (s *InvoiceRenderService) ensureBrowserLocked() error {
+	if s.allocCtx != nil && s.allocCtx.Err() == nil {
+		return nil
+	}
+
+	s.resetBrowserLocked()
+
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.DisableGPU,
+		chromedp.NoSandbox,
+		chromedp.Headless,
+		chromedp.WindowSize(1100, 750),
+	)
+
+	localAppData := os.Getenv("LOCALAPPDATA")
+	programFiles := os.Getenv("ProgramFiles")
+	programFilesX86 := os.Getenv("ProgramFiles(x86)")
+
+	chromePaths := []string{
+		filepath.Join(localAppData, `Microsoft\Edge\Application\msedge.exe`),
+		filepath.Join(localAppData, `Google\Chrome\Application\chrome.exe`),
+		filepath.Join(programFiles, `Microsoft\Edge\Application\msedge.exe`),
+		filepath.Join(programFilesX86, `Microsoft\Edge\Application\msedge.exe`),
+		`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+		`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
+		filepath.Join(programFiles, `Google\Chrome\Application\chrome.exe`),
+		filepath.Join(programFilesX86, `Google\Chrome\Application\chrome.exe`),
+		`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+	}
+	for _, cp := range chromePaths {
+		if cp != "" {
+			if _, err := os.Stat(cp); err == nil {
+				opts = append(opts, chromedp.ExecPath(cp))
+				break
+			}
+		}
+	}
+
+	s.allocCtx, s.cancelAlloc = chromedp.NewExecAllocator(context.Background(), opts...)
+	log.Println("🌐 [Invoice Render Worker] Persistent headless browser worker spawned.")
+	return nil
+}
+
+func (s *InvoiceRenderService) resetBrowserLocked() {
+	if s.cancelAlloc != nil {
+		s.cancelAlloc()
+		s.cancelAlloc = nil
+	}
+	s.allocCtx = nil
+}
+
+func (s *InvoiceRenderService) renderHTMLToPNG(htmlContent string, elementSelector string) ([]byte, error) {
+	s.renderMu.Lock()
+	defer s.renderMu.Unlock()
+
+	if s.idleTimer != nil {
+		s.idleTimer.Stop()
+	}
+
+	defer func() {
+		// Reset 5-minute idle timer to close headless browser when not in use
+		s.idleTimer = time.AfterFunc(5*time.Minute, func() {
+			s.renderMu.Lock()
+			defer s.renderMu.Unlock()
+			if s.allocCtx != nil {
+				log.Println("💤 [Invoice Render Worker] Idle timeout reached (5m). Terminating browser worker to free RAM.")
+				s.resetBrowserLocked()
+			}
+		})
+	}()
+
+	renderOnce := func() ([]byte, error) {
+		if err := s.ensureBrowserLocked(); err != nil {
+			return nil, err
+		}
+
+		tabCtx, cancelTab := chromedp.NewContext(s.allocCtx)
+		defer cancelTab()
+
+		timeoutCtx, cancelTimeout := context.WithTimeout(tabCtx, 15*time.Second)
+		defer cancelTimeout()
+
+		var buf []byte
+		err := chromedp.Run(timeoutCtx,
+			chromedp.Navigate("about:blank"),
+			chromedp.ActionFunc(func(ctx context.Context) error {
+				tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("render_%d_%d.html", os.Getpid(), time.Now().UnixNano()))
+				defer os.Remove(tmpFile)
+
+				if err := os.WriteFile(tmpFile, []byte(htmlContent), 0644); err != nil {
+					return err
+				}
+
+				fileURL := "file:///" + filepath.ToSlash(tmpFile)
+				return chromedp.Navigate(fileURL).Do(ctx)
+			}),
+			chromedp.WaitVisible(elementSelector, chromedp.ByID),
+			chromedp.Screenshot(elementSelector, &buf, chromedp.ByID),
+		)
+		if err != nil {
+			return nil, err
+		}
+		return buf, nil
+	}
+
+	// First attempt
+	buf, err := renderOnce()
+	if err != nil {
+		// Auto-Recovery Guard: In case of browser crash or closed pipe, reset allocator and retry once
+		log.Printf("⚠️ [Invoice Render Worker] Browser render error (%v). Auto-recovering fresh browser worker...", err)
+		s.resetBrowserLocked()
+		buf, err = renderOnce()
+		if err != nil {
+			s.resetBrowserLocked()
+			return nil, fmt.Errorf("failed to render image after auto-recovery: %w", err)
+		}
+		log.Println("✅ [Invoice Render Worker] Auto-recovery successful, rendered image.")
+	}
+
+	return buf, nil
+}
+
 func (s *InvoiceRenderService) RenderInvoicePNG(invoiceID int64) ([]byte, error) {
 	var invoice models.Invoice
 	err := s.db.Preload("Customer").
@@ -104,59 +235,7 @@ func (s *InvoiceRenderService) RenderInvoicePNG(invoiceID int64) ([]byte, error)
 	}
 
 	htmlContent := s.generateInvoiceHTML(&invoice, &settings)
-
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.DisableGPU,
-		chromedp.NoSandbox,
-		chromedp.Headless,
-		chromedp.WindowSize(1100, 750),
-	)
-
-	chromePaths := []string{
-		`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
-		`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
-		`C:\Program Files\Google\Chrome\Application\chrome.exe`,
-		`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
-	}
-	for _, cp := range chromePaths {
-		if _, err := os.Stat(cp); err == nil {
-			opts = append(opts, chromedp.ExecPath(cp))
-			break
-		}
-	}
-
-	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), opts...)
-	defer cancelAlloc()
-
-	ctx, cancelCtx := chromedp.NewContext(allocCtx)
-	defer cancelCtx()
-
-	ctx, cancelTimeout := context.WithTimeout(ctx, 15*time.Second)
-	defer cancelTimeout()
-
-	var buf []byte
-	err = chromedp.Run(ctx,
-		chromedp.Navigate("about:blank"),
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("invoice_%d_%d.html", invoiceID, time.Now().UnixNano()))
-			defer os.Remove(tmpFile)
-
-			if err := os.WriteFile(tmpFile, []byte(htmlContent), 0644); err != nil {
-				return err
-			}
-
-			fileURL := "file:///" + filepath.ToSlash(tmpFile)
-			return chromedp.Navigate(fileURL).Do(ctx)
-		}),
-		chromedp.WaitVisible("#invoice-card", chromedp.ByID),
-		chromedp.Screenshot("#invoice-card", &buf, chromedp.ByID),
-	)
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to render invoice image: %w", err)
-	}
-
-	return buf, nil
+	return s.renderHTMLToPNG(htmlContent, "#invoice-card")
 }
 
 func cleanAndFormatStationPhones(p1, p2 *string) string {
@@ -246,6 +325,8 @@ func (s *InvoiceRenderService) generateInvoiceHTML(inv *models.Invoice, set *mod
 			address = *inv.Customer.Address
 		}
 	}
+	custName = html.EscapeString(custName)
+	address = html.EscapeString(address)
 
 	invNo := fmt.Sprintf("%d", inv.ID)
 	if inv.InvoiceNumber != nil && *inv.InvoiceNumber != "" {
@@ -262,7 +343,7 @@ func (s *InvoiceRenderService) generateInvoiceHTML(inv *models.Invoice, set *mod
 	cycleTitle := fmt.Sprintf(`<span style="color: #dc2626;">فاتورة استهلاك كهرباء دورة </span><span style="color: #1e3a8a;">%s</span>`, cycleName)
 
 	dateStr := time.Now().Format("02/01/2006")
-	if !inv.CreatedAt.IsZero() {
+	if inv.CreatedAt != nil && !inv.CreatedAt.IsZero() {
 		dateStr = inv.CreatedAt.Format("02/01/2006")
 	}
 
@@ -289,14 +370,22 @@ func (s *InvoiceRenderService) generateInvoiceHTML(inv *models.Invoice, set *mod
 	if inv.FixedFeeSnapshot > 0 {
 		feeStr = formatMoney(inv.FixedFeeSnapshot)
 	}
+
+	kwhPrice := inv.KwhPriceSnapshot
+	if kwhPrice <= 0 {
+		if inv.Customer != nil && inv.Customer.SubscriptionPlan != nil && inv.Customer.SubscriptionPlan.KwhPrice > 0 {
+			kwhPrice = inv.Customer.SubscriptionPlan.KwhPrice
+		} else if set.DefaultKwhPrice > 0 {
+			kwhPrice = set.DefaultKwhPrice
+		} else {
+			kwhPrice = 1400
+		}
+	}
+
 	valStr := ""
 	consVal := inv.ConsumptionValue
 	if consVal <= 0 && inv.Consumption > 0 {
-		price := inv.KwhPriceSnapshot
-		if price <= 0 {
-			price = 1400
-		}
-		consVal = inv.Consumption * price
+		consVal = inv.Consumption * kwhPrice
 	}
 	if consVal > 0 {
 		valStr = formatMoney(consVal)
@@ -520,7 +609,7 @@ func (s *InvoiceRenderService) generateInvoiceHTML(inv *models.Invoice, set *mod
           <div>o في حالة تأخر السداد سيتم فصل التيار دون إشعار مسبق ولن يعاد الا بغرامة.</div>
           <div>o في حال قيام المشترك بتوصيل التيار لشخص آخر سيتم تغريم المشترك مبلغ وقدره 200000 مائتان ألف ريال</div>
           <div>o يتحمل المشترك مديونية أي موقف إن لم يكن هناك سند رسمي مختوم بختم المحطة.</div>
-          <div>o سعر الكيلوواط / ساعة 1400 ريال ويرتفع سعر الكيلو بنسبة وتناسب بارتفاع الديزل.</div>
+          <div>o سعر الكيلوواط / ساعة %s ريال ويرتفع سعر الكيلو بنسبة وتناسب بارتفاع الديزل.</div>
         </div>
       </div>
 
@@ -558,6 +647,7 @@ func (s *InvoiceRenderService) generateInvoiceHTML(inv *models.Invoice, set *mod
 		cycleTitle,
 		prevStr, currStr, consStr, feeStr, valStr, arrStr, dueStr,
 		dueStr, paidStr, remColor, remainingText,
+		formatMoney(kwhPrice),
 
 		// Date
 		dateStr,
@@ -597,59 +687,7 @@ func (s *InvoiceRenderService) RenderPaymentReceiptPNG(paymentID int64) ([]byte,
 		Select("COALESCE(SUM(remaining_amount), 0)").Scan(&remainingBalance)
 
 	htmlContent := s.generateReceiptHTML(&payment, &invoice, &settings, remainingBalance)
-
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.DisableGPU,
-		chromedp.NoSandbox,
-		chromedp.Headless,
-		chromedp.WindowSize(1100, 750),
-	)
-
-	chromePaths := []string{
-		`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
-		`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
-		`C:\Program Files\Google\Chrome\Application\chrome.exe`,
-		`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
-	}
-	for _, cp := range chromePaths {
-		if _, err := os.Stat(cp); err == nil {
-			opts = append(opts, chromedp.ExecPath(cp))
-			break
-		}
-	}
-
-	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), opts...)
-	defer cancelAlloc()
-
-	ctx, cancelCtx := chromedp.NewContext(allocCtx)
-	defer cancelCtx()
-
-	ctx, cancelTimeout := context.WithTimeout(ctx, 15*time.Second)
-	defer cancelTimeout()
-
-	var buf []byte
-	err = chromedp.Run(ctx,
-		chromedp.Navigate("about:blank"),
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("receipt_%d_%d.html", paymentID, time.Now().UnixNano()))
-			defer os.Remove(tmpFile)
-
-			if err := os.WriteFile(tmpFile, []byte(htmlContent), 0644); err != nil {
-				return err
-			}
-
-			fileURL := "file:///" + filepath.ToSlash(tmpFile)
-			return chromedp.Navigate(fileURL).Do(ctx)
-		}),
-		chromedp.WaitVisible("#receipt-card", chromedp.ByID),
-		chromedp.Screenshot("#receipt-card", &buf, chromedp.ByID),
-	)
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to render receipt image: %w", err)
-	}
-
-	return buf, nil
+	return s.renderHTMLToPNG(htmlContent, "#receipt-card")
 }
 
 func (s *InvoiceRenderService) generateReceiptHTML(payment *models.Payment, inv *models.Invoice, set *models.SystemSettings, remainingBalance float64) string {
@@ -682,6 +720,8 @@ func (s *InvoiceRenderService) generateReceiptHTML(payment *models.Payment, inv 
 			address = *payment.Customer.Address
 		}
 	}
+	custName = html.EscapeString(custName)
+	address = html.EscapeString(address)
 
 	receiptNo := fmt.Sprintf("REC-%06d", payment.ID)
 	if payment.ReceiptNumber != nil && *payment.ReceiptNumber != "" {
@@ -715,26 +755,57 @@ func (s *InvoiceRenderService) generateReceiptHTML(payment *models.Payment, inv 
 	consumptionVal := 0.0
 	arrears := 0.0
 	totalDue := 0.0
-	remaining := remainingBalance
+	kwhPrice := 1400.0
 
 	if inv != nil && inv.ID > 0 {
 		prevReading = inv.PreviousReading
 		currReading = inv.CurrentReading
 		consumption = inv.Consumption
 		fixedFee = inv.FixedFeeSnapshot
+		kwhPrice = inv.KwhPriceSnapshot
+		if kwhPrice <= 0 {
+			if payment.Customer != nil && payment.Customer.SubscriptionPlan != nil && payment.Customer.SubscriptionPlan.KwhPrice > 0 {
+				kwhPrice = payment.Customer.SubscriptionPlan.KwhPrice
+			} else if set.DefaultKwhPrice > 0 {
+				kwhPrice = set.DefaultKwhPrice
+			} else {
+				kwhPrice = 1400
+			}
+		}
 		consumptionVal = inv.ConsumptionValue
 		if consumptionVal <= 0 && consumption > 0 {
-			price := inv.KwhPriceSnapshot
-			if price <= 0 {
-				price = 1400
-			}
-			consumptionVal = consumption * price
+			consumptionVal = consumption * kwhPrice
 		}
 		arrears = inv.Arrears
 		totalDue = inv.TotalDue
-		if inv.RemainingAmount != 0 || inv.PaidAmount > 0 {
-			remaining = inv.RemainingAmount
+	} else {
+		if payment.Customer != nil && payment.Customer.SubscriptionPlan != nil && payment.Customer.SubscriptionPlan.KwhPrice > 0 {
+			kwhPrice = payment.Customer.SubscriptionPlan.KwhPrice
+		} else if set.DefaultKwhPrice > 0 {
+			kwhPrice = set.DefaultKwhPrice
 		}
+		totalDue = payment.AmountPaid + remainingBalance
+	}
+
+	// Financial invariant: calculate remaining balance accurately
+	var remaining float64
+	if inv != nil && inv.ID > 0 {
+		if payment.AmountPaid >= totalDue && remainingBalance <= 0 {
+			overpaid := math.Round((payment.AmountPaid-totalDue)*100) / 100
+			if overpaid > 0 {
+				remaining = -overpaid
+			} else {
+				remaining = 0
+			}
+		} else if inv.RemainingAmount == 0 && payment.AmountPaid > 0 && remainingBalance == 0 {
+			remaining = 0
+		} else if remainingBalance > 0 {
+			remaining = remainingBalance
+		} else {
+			remaining = math.Round((totalDue-payment.AmountPaid)*100) / 100
+		}
+	} else {
+		remaining = remainingBalance
 	}
 
 	prevStr := ""
@@ -854,7 +925,7 @@ func (s *InvoiceRenderService) generateReceiptHTML(payment *models.Payment, inv 
               <th colspan="2">قــــــراءة العداد</th>
               <th rowspan="2">الفارق</th>
               <th rowspan="2">متأخرات</th>
-              <th rowspan="2">المتبقي</th>
+              <th rowspan="2">الاجمالي</th>
             </tr>
             <tr>
               <th>ق.السابقة</th>
@@ -975,7 +1046,7 @@ func (s *InvoiceRenderService) generateReceiptHTML(payment *models.Payment, inv 
           <div>o في حالة تأخر السداد سيتم فصل التيار دون إشعار مسبق ولن يعاد الا بغرامة.</div>
           <div>o في حال قيام المشترك بتوصيل التيار لشخص آخر سيتم تغريم المشترك مبلغ وقدره 200000 مائتان ألف ريال</div>
           <div>o يتحمل المشترك مديونية أي موقف إن لم يكن هناك سند رسمي مختوم بختم المحطة.</div>
-          <div>o سعر الكيلوواط / ساعة 1400 ريال ويرتفع سعر الكيلو بنسبة وتناسب بارتفاع الديزل.</div>
+          <div>o سعر الكيلوواط / ساعة %s ريال ويرتفع سعر الكيلو بنسبة وتناسب بارتفاع الديزل.</div>
         </div>
       </div>
 
@@ -1003,7 +1074,7 @@ func (s *InvoiceRenderService) generateReceiptHTML(payment *models.Payment, inv 
 		stationName, stationPhone, logoImgHTML,
 		custName, address, subNo, meterNo,
 		cycleTitle,
-		prevStr, currStr, consStr, arrStr, formatMoney(remaining),
+		prevStr, currStr, consStr, arrStr, dueStr,
 		paidStr,
 		couponRemLabel, remColor, couponRemVal,
 
@@ -1013,6 +1084,7 @@ func (s *InvoiceRenderService) generateReceiptHTML(payment *models.Payment, inv 
 		cycleTitle,
 		prevStr, currStr, consStr, feeStr, valStr, arrStr, dueStr,
 		dueStr, paidStr, remColor, remainingText,
+		formatMoney(kwhPrice),
 
 		// Date
 		dateStr,

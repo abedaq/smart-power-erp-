@@ -295,15 +295,6 @@ export const approvePaymentApi = async (id: number) => {
   }
 };
 
-export const rejectPaymentApi = async (id: number, reason: string) => {
-  try {
-    const res = await api.post(`/payments/reject/${id}`, { reason });
-    return res.data;
-  } catch (err: any) {
-    throw new Error(err.response?.data?.message || err.message || 'فشل رفض السداد');
-  }
-};
-
 export const updatePaymentAmountApi = async (id: number, amount_paid: number) => {
   try {
     const res = await api.put(`/payments/${id}`, { amount_paid });

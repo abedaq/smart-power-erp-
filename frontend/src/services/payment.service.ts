@@ -14,3 +14,7 @@ export const getPayments = async () => {
 
 export const sendReceiptWhatsAppApi = (paymentId: number) =>
   api.post(`/payments/${paymentId}/send-whatsapp`).then((res) => res.data);
+
+export const reversePaymentApi = (paymentId: number, reason: string = '') =>
+  api.post(`/payments/${paymentId}/reverse`, { reason }).then((res) => res.data);
+

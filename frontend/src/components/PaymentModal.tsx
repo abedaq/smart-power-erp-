@@ -185,8 +185,6 @@ o سعر الكيلوواط/ ساعة ${planPrice.toLocaleString('en-US')} ري�
       prevReading,
       currReading,
       units: computedUnits,
-      lostUnits: 0,
-      lostUnitsCost: 0,
       unitPrice: planPrice,
       serviceFee: planFee,
       consumptionCost,

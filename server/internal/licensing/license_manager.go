@@ -2,7 +2,11 @@ package licensing
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,22 +21,25 @@ import (
 )
 
 const (
-	SupabaseURL    = "https://pkuoytiickgbtfeffmxq.supabase.co"
-	SupabaseAnonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBrdW95dGlpY2tnYnRmZWZmbXhxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg0NDk0MjAsImV4cCI6MjEwNDAyNTQyMH0.9aGjAHdibP2uKiiTQ8XuGsYmwsZeWsA3hVQ9gD4xq7Q"
-	AppVersion      = "12.04.5"
-	LicenseFileName = "smartpower_license.dat"
+	SupabaseURL                 = "https://pkuoytiickgbtfeffmxq.supabase.co"
+	SupabaseAnonKey             = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBrdW95dGlpY2tnYnRmZWZmbXhxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg0NDk0MjAsImV4cCI6MjEwNDAyNTQyMH0.9aGjAHdibP2uKiiTQ8XuGsYmwsZeWsA3hVQ9gD4xq7Q"
+	AppVersion                  = "12.04.5"
+	LicenseFileName             = "smartpower_license.dat"
+	MasterLicenseSigningSecret  = "b164687942e83b7d1726355a83a4b12d5487779f127786ea3c173bff25214c10"
+	DefaultLicenseSigningSecret = "smartpower-default-master-key-2026"
 )
 
 // LicenseData هيكل البيانات المخزنة محلياً
 type LicenseData struct {
-	LicenseKey     string    `json:"license_key"`
-	ClientName     string    `json:"client_name"`
-	BoundHWID      string    `json:"bound_hwid"`
-	Token          string    `json:"token"`
-	ExpiresAt      time.Time `json:"expires_at"`
-	MaxOfflineDays int       `json:"max_offline_days"`
-	LastHeartbeat  time.Time `json:"last_heartbeat"`
-	LastSystemTime int64     `json:"last_system_time"`
+	LicenseKey         string    `json:"license_key"`
+	ClientName         string    `json:"client_name"`
+	BoundHWID          string    `json:"bound_hwid"`
+	Token              string    `json:"token"`
+	ExpiresAt          time.Time `json:"expires_at"`
+	MaxOfflineDays     int       `json:"max_offline_days"`
+	LastHeartbeat      time.Time `json:"last_heartbeat"`
+	LastSystemTime     int64     `json:"last_system_time"`
+	UsedEmergencyCodes []string  `json:"used_emergency_codes,omitempty"`
 }
 
 // LicenseStatus الحالة المعروضة للواجهة والمستخدم
@@ -258,7 +265,7 @@ func (lm *LicenseManager) Activate(licenseKey string) (LicenseStatus, error) {
 	return lm.LoadAndVerify(), nil
 }
 
-// ActivateOfflineCode يقوم بتفعيل كود طوارئ أوفلاين تم توليده من الإدارة
+// ActivateOfflineCode يقوم بتفعيل كود طوارئ أوفلاين تم توليده من الإدارة مع التحقق التشفيري الكامل
 func (lm *LicenseManager) ActivateOfflineCode(emergencyCode string) (LicenseStatus, error) {
 	emergencyCode = strings.ToUpper(strings.TrimSpace(emergencyCode))
 	if !strings.HasPrefix(emergencyCode, "EMG-") {
@@ -271,10 +278,95 @@ func (lm *LicenseManager) ActivateOfflineCode(emergencyCode string) (LicenseStat
 		return lm.GetStatus(), errors.New("يجب تفعيل البرنامج لمرة واحدة على الأقل قبل استخدام كود الطوارئ")
 	}
 
-	// تمديد محلي مؤقت بـ 15 يوماً إضافية
-	lm.current.ExpiresAt = time.Now().AddDate(0, 0, 15)
+	// 1. فحص عدم تكرار استخدام نفس الكود (Anti-Replay Protection)
+	for _, used := range lm.current.UsedEmergencyCodes {
+		if used == emergencyCode {
+			lm.mu.Unlock()
+			return lm.GetStatus(), errors.New("تم استخدام كود الطوارئ هذا مسبقاً ولا يمكن إعادة تفعيله مرة أخرى")
+		}
+	}
+
+	// 2. فحص التوقيع الرياضي المشفر لكود الطوارئ
+	// الصيغة القياسية: EMG-{days}-{hash12}
+	// الصيغة السابقة: EMG-{hash16}
+	extendDays := 15
+	isValidCode := false
+
+	candidateSecrets := []string{
+		os.Getenv("LICENSE_SIGNING_SECRET"),
+		MasterLicenseSigningSecret,
+		DefaultLicenseSigningSecret,
+	}
+
+	parts := strings.Split(emergencyCode, "-")
+	if len(parts) == 3 {
+		// EMG-{days}-{hash12}
+		if d, err := strconv.Atoi(parts[1]); err == nil && d > 0 && d <= 90 {
+			extendDays = d
+			expectedPayload := fmt.Sprintf("EMERGENCY|%s|%s|%d", lm.current.LicenseKey, lm.current.BoundHWID, extendDays)
+			for _, sec := range candidateSecrets {
+				if sec == "" {
+					continue
+				}
+				mac := hmac.New(sha256.New, []byte(sec))
+				mac.Write([]byte(expectedPayload))
+				expectedSig := strings.ToUpper(hex.EncodeToString(mac.Sum(nil)))
+				if len(expectedSig) >= 12 && subtle.ConstantTimeCompare([]byte(expectedSig[:12]), []byte(parts[2])) == 1 {
+					isValidCode = true
+					break
+				}
+			}
+		}
+	} else if len(parts) == 2 && len(parts[1]) == 16 {
+		// EMG-{hash16}
+		expectedPayload := fmt.Sprintf("EMERGENCY|%s|%s|%d", lm.current.LicenseKey, lm.current.BoundHWID, 15)
+		for _, sec := range candidateSecrets {
+			if sec == "" {
+				continue
+			}
+			mac := hmac.New(sha256.New, []byte(sec))
+			mac.Write([]byte(expectedPayload))
+			expectedSig := strings.ToUpper(hex.EncodeToString(mac.Sum(nil)))
+			if len(expectedSig) >= 16 && subtle.ConstantTimeCompare([]byte(expectedSig[:16]), []byte(parts[1])) == 1 {
+				isValidCode = true
+				break
+			}
+		}
+	}
+
+	if !isValidCode {
+		lm.mu.Unlock()
+		return lm.GetStatus(), errors.New("كود الطوارئ غير صالح أو غير مخصص لهذا الجهاز")
+	}
+
+	// تسجيل الكود في قائمة الأكواد المستهلكة محلياً لمنع تكراره
+	lm.current.UsedEmergencyCodes = append(lm.current.UsedEmergencyCodes, emergencyCode)
+
+	// تمديد الترخيص محلياً بالأيام المقررة
+	baseTime := time.Now()
+	if lm.current.ExpiresAt.After(baseTime) {
+		baseTime = lm.current.ExpiresAt
+	}
+	lm.current.ExpiresAt = baseTime.AddDate(0, 0, extendDays)
 	lm.current.LastHeartbeat = time.Now()
 	lm.current.LastSystemTime = time.Now().Unix()
+
+	// تحديث التوكن ليعكس التاريخ الجديد منعاً لرفضه أثناء التحقق الدوري
+	newExpiresEpoch := lm.current.ExpiresAt.Unix()
+	newIssuedAt := time.Now().Unix()
+	newPayloadStr := fmt.Sprintf("%s|%s|%s|%d|%d|%d",
+		lm.current.LicenseKey,
+		lm.current.BoundHWID,
+		lm.current.ClientName,
+		newExpiresEpoch,
+		lm.current.MaxOfflineDays,
+		newIssuedAt,
+	)
+	mac := hmac.New(sha256.New, []byte(MasterLicenseSigningSecret))
+	mac.Write([]byte(newPayloadStr))
+	newSig := hex.EncodeToString(mac.Sum(nil))
+	lm.current.Token = base64.StdEncoding.EncodeToString([]byte(newPayloadStr)) + "." + newSig
+
 	lm.saveLocalLicense(lm.current)
 	lm.mu.Unlock()
 
@@ -413,6 +505,36 @@ func parseAndValidateToken(tokenStr string, expectedHWID string) (*tokenPayload,
 	payloadBytes, err := base64.StdEncoding.DecodeString(parts[0])
 	if err != nil {
 		return nil, errors.New("فشل فك ترميز حمولة التوكن")
+	}
+
+	rawSig := strings.ToLower(strings.TrimSpace(parts[1]))
+	if len(rawSig) != 64 {
+		return nil, errors.New("التوقيع الرقمي للتوكن مفقود أو غير مكتمل")
+	}
+
+	// 1. التحقق الجنائي من التوقيع الرقمي HMAC-SHA256
+	candidateSecrets := []string{
+		os.Getenv("LICENSE_SIGNING_SECRET"),
+		MasterLicenseSigningSecret,
+		DefaultLicenseSigningSecret,
+	}
+
+	sigMatched := false
+	for _, sec := range candidateSecrets {
+		if sec == "" {
+			continue
+		}
+		mac := hmac.New(sha256.New, []byte(sec))
+		mac.Write(payloadBytes)
+		computedSig := hex.EncodeToString(mac.Sum(nil))
+		if subtle.ConstantTimeCompare([]byte(computedSig), []byte(rawSig)) == 1 {
+			sigMatched = true
+			break
+		}
+	}
+
+	if !sigMatched {
+		return nil, errors.New("التوقيع الرقمي للترخيص غير صالح أو تم التلاعب بمحتواه")
 	}
 
 	fields := strings.Split(string(payloadBytes), "|")

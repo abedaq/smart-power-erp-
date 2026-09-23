@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -15,11 +16,6 @@ import (
 	"smartpower/internal/models"
 
 	"gorm.io/gorm"
-)
-
-const (
-	defaultSupabaseURL = "https://pkuoytiickgbtfeffmxq.supabase.co"
-	defaultAnonKey     = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBrdW95dGlpY2tnYnRmZWZmbXhxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg0NDk0MjAsImV4cCI6MjEwNDAyNTQyMH0.9aGjAHdibP2uKiiTQ8XuGsYmwsZeWsA3hVQ9gD4xq7Q"
 )
 
 type SyncStatus struct {
@@ -44,11 +40,30 @@ type CloudSyncService struct {
 }
 
 func NewCloudSyncService(db *gorm.DB, cfg *config.Config) *CloudSyncService {
+	supaURL := ""
+	anonKey := ""
+	if cfg != nil {
+		supaURL = cfg.SupabaseURL
+		anonKey = cfg.SupabaseAnonKey
+	}
+	if supaURL == "" {
+		supaURL = os.Getenv("SUPABASE_URL")
+	}
+	if supaURL == "" {
+		supaURL = "https://pkuoytiickgbtfeffmxq.supabase.co"
+	}
+	if anonKey == "" {
+		anonKey = os.Getenv("SUPABASE_ANON_KEY")
+	}
+	if anonKey == "" {
+		anonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBrdW95dGlpY2tnYnRmZWZmbXhxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg0NDk0MjAsImV4cCI6MjEwNDAyNTQyMH0.9aGjAHdibP2uKiiTQ8XuGsYmwsZeWsA3hVQ9gD4xq7Q"
+	}
+
 	s := &CloudSyncService{
 		db:          db,
 		cfg:         cfg,
-		supabaseURL: defaultSupabaseURL,
-		anonKey:     defaultAnonKey,
+		supabaseURL: supaURL,
+		anonKey:     anonKey,
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
@@ -390,7 +405,6 @@ func (s *CloudSyncService) syncMeterReadings() (int, error) {
 		ApprovalStatus   string    `json:"approval_status"`
 		ClientMutationID *string   `json:"client_mutation_id,omitempty"`
 		WhatsAppSent     bool      `json:"whatsapp_sent"`
-		LostUnits        float64   `json:"lost_units"`
 	}
 
 	var dtos []readingDTO
@@ -412,7 +426,6 @@ func (s *CloudSyncService) syncMeterReadings() (int, error) {
 			ApprovalStatus:   r.ApprovalStatus,
 			ClientMutationID: r.ClientMutationID,
 			WhatsAppSent:     r.WhatsAppSent,
-			LostUnits:        r.LostUnits,
 		})
 	}
 
@@ -438,7 +451,6 @@ func (s *CloudSyncService) syncInvoices() (int, error) {
 		PreviousReading  float64   `json:"previous_reading"`
 		CurrentReading   float64   `json:"current_reading"`
 		Consumption      float64   `json:"consumption"`
-		LostUnits        float64   `json:"lost_units"`
 		ConsumptionValue float64   `json:"consumption_value"`
 		KwhPriceSnapshot float64   `json:"kwh_price_snapshot"`
 		FixedFeeSnapshot float64   `json:"fixed_fee_snapshot"`
@@ -471,7 +483,6 @@ func (s *CloudSyncService) syncInvoices() (int, error) {
 			PreviousReading:  inv.PreviousReading,
 			CurrentReading:   inv.CurrentReading,
 			Consumption:      inv.Consumption,
-			LostUnits:        inv.LostUnits,
 			ConsumptionValue: inv.ConsumptionValue,
 			KwhPriceSnapshot: inv.KwhPriceSnapshot,
 			FixedFeeSnapshot: inv.FixedFeeSnapshot,

@@ -32,11 +32,13 @@ func NewCustomerService() *CustomerService {
 
 var leadingZeroRegex = regexp.MustCompile(`^0+`)
 
-// NormalizeSubscriberNumber cleans and normalizes subscriber numbers by trimming whitespace,
-// lowercasing, and stripping leading zeros. If the string consists only of zeros, it returns "0"
+// NormalizeSubscriberNumber cleans and normalizes subscriber numbers by converting Eastern Arabic/Persian
+// digits to English digits, trimming whitespace, lowercasing, and stripping leading zeros.
+// If the string consists only of zeros (or empty/whitespace), it returns "0"
 // to ensure 100% parity with COALESCE(NULLIF(REGEXP_REPLACE(..., '^0+', ''), ''), '0').
 func NormalizeSubscriberNumber(sub string) string {
-	trimmed := strings.ToLower(strings.TrimSpace(sub))
+	converted := ToEnglishDigits(sub)
+	trimmed := strings.ToLower(strings.TrimSpace(converted))
 	cleaned := leadingZeroRegex.ReplaceAllString(trimmed, "")
 	if cleaned == "" {
 		return "0"
@@ -234,7 +236,6 @@ func (s *CustomerService) CreateCustomer(customer *models.Customer, auditCtx mod
 		PreviousReading:  customer.InitialReading,
 		CurrentReading:   0,
 		Consumption:      0,
-		LostUnits:        0,
 		ConsumptionValue: 0,
 		KwhPriceSnapshot: kwhPrice,
 		FixedFeeSnapshot: fixedFee,
@@ -354,7 +355,6 @@ func (s *CustomerService) EnsureAllCustomersHaveActiveInvoice() error {
 			previous_reading,
 			current_reading,
 			consumption,
-			lost_units,
 			consumption_value,
 			arrears,
 			total_amount,
@@ -367,11 +367,7 @@ func (s *CustomerService) EnsureAllCustomersHaveActiveInvoice() error {
 		)
 		SELECT 
 			c.id,
-			'INV-' || ? || '-' || LPAD(
-				COALESCE(NULLIF(REGEXP_REPLACE(c.subscriber_number::text, '^0+', ''), ''), '0'),
-				GREATEST(4, LENGTH(COALESCE(NULLIF(REGEXP_REPLACE(c.subscriber_number::text, '^0+', ''), ''), '0'))),
-				'0'
-			),
+			public.fn_generate_invoice_number(?, c.subscriber_number::text),
 			?,
 			CURRENT_DATE + INTERVAL '30 days',
 			'Unpaid',
@@ -394,15 +390,17 @@ func (s *CustomerService) EnsureAllCustomersHaveActiveInvoice() error {
 				c.initial_reading
 			),
 			0, -- الاستهلاك المبدئي
-			0, -- الفاقد المبدئي
 			0, -- قيمة الاستهلاك المبدئي
-			-- المتأخرات الحقيقية من الفواتير السابقة غير المسددة مع استبعاد الملغاة
+			-- المتأخرات الحقيقية من الفواتير السابقة غير المسددة مع استبعاد الملغاة وشمول الفائض السالب
 			COALESCE((
 				SELECT SUM(old_inv.remaining_amount) 
 				FROM invoices old_inv 
 				WHERE old_inv.customer_id = c.id 
-				  AND old_inv.billing_cycle < ? 
-				  AND LOWER(old_inv.status) NOT IN ('paid', 'void', 'cancelled')
+				  AND old_inv.billing_cycle IN (
+				      SELECT code FROM billing_cycles 
+				      WHERE id < COALESCE((SELECT id FROM billing_cycles WHERE code = ? LIMIT 1), 999999)
+				  )
+				  AND (LOWER(old_inv.status) NOT IN ('paid', 'void', 'cancelled') OR old_inv.remaining_amount < 0)
 			), 0.0),
 			-- إجمالي مبيعات الفاتورة الحالية فقط (الرسوم الثابتة) لمنع تضخيم الأرباح
 			COALESCE(p.fixed_fee, 1000.0),
@@ -411,8 +409,11 @@ func (s *CustomerService) EnsureAllCustomersHaveActiveInvoice() error {
 				SELECT SUM(old_inv.remaining_amount) 
 				FROM invoices old_inv 
 				WHERE old_inv.customer_id = c.id 
-				  AND old_inv.billing_cycle < ? 
-				  AND LOWER(old_inv.status) NOT IN ('paid', 'void', 'cancelled')
+				  AND old_inv.billing_cycle IN (
+				      SELECT code FROM billing_cycles 
+				      WHERE id < COALESCE((SELECT id FROM billing_cycles WHERE code = ? LIMIT 1), 999999)
+				  )
+				  AND (LOWER(old_inv.status) NOT IN ('paid', 'void', 'cancelled') OR old_inv.remaining_amount < 0)
 			), 0.0),
 			0, -- المبلغ المسدد
 			-- المبلغ المتبقي المطلوب سداده
@@ -420,8 +421,11 @@ func (s *CustomerService) EnsureAllCustomersHaveActiveInvoice() error {
 				SELECT SUM(old_inv.remaining_amount) 
 				FROM invoices old_inv 
 				WHERE old_inv.customer_id = c.id 
-				  AND old_inv.billing_cycle < ? 
-				  AND LOWER(old_inv.status) NOT IN ('paid', 'void', 'cancelled')
+				  AND old_inv.billing_cycle IN (
+				      SELECT code FROM billing_cycles 
+				      WHERE id < COALESCE((SELECT id FROM billing_cycles WHERE code = ? LIMIT 1), 999999)
+				  )
+				  AND (LOWER(old_inv.status) NOT IN ('paid', 'void', 'cancelled') OR old_inv.remaining_amount < 0)
 			), 0.0),
 			'APPROVED',
 			CURRENT_TIMESTAMP,
@@ -440,6 +444,22 @@ func (s *CustomerService) EnsureAllCustomersHaveActiveInvoice() error {
 		tx.Rollback()
 		log.Printf("⚠️ Warning inserting cycle active invoices: %v", err)
 		return err
+	}
+
+	// 2.4 Credit Roll-Forward: تصفير أرصدة الفواتير السابقة السالبة التي استوعبتها فواتير الدورة الجديدة
+	zeroPreviousCreditsSQL := `
+		UPDATE invoices
+		SET remaining_amount = 0.00,
+		    status = 'Paid',
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE remaining_amount < 0
+		  AND billing_cycle != ?
+		  AND customer_id IN (
+			  SELECT customer_id FROM invoices WHERE billing_cycle = ?
+		  );
+	`
+	if err := tx.Exec(zeroPreviousCreditsSQL, latestCycle, latestCycle).Error; err != nil {
+		log.Printf("⚠️ Warning zeroing absorbed prior invoice credits: %v", err)
 	}
 
 	return tx.Commit().Error
@@ -695,7 +715,7 @@ func (s *CustomerService) UpdateGridCell(id int64, payload map[string]interface{
 			remainingAmount := math.Round((totalDue-paidAmount)*100) / 100
 
 			status := "Unpaid"
-			if remainingAmount <= 0 && paidAmount > 0 {
+			if remainingAmount <= 0 {
 				status = "Paid"
 			} else if paidAmount > 0 {
 				status = "Partially_Paid"
@@ -773,7 +793,7 @@ func (s *CustomerService) UpdateGridCell(id int64, payload map[string]interface{
 						downInv.TotalAmount = math.Round((downInv.ConsumptionValue+downInv.FixedFeeSnapshot)*100) / 100
 						downInv.TotalDue = math.Round((downInv.TotalAmount+downInv.Arrears)*100) / 100
 						downInv.RemainingAmount = math.Round((downInv.TotalDue-downInv.PaidAmount)*100) / 100
-						if downInv.RemainingAmount <= 0 && downInv.PaidAmount > 0 {
+						if downInv.RemainingAmount <= 0 {
 							downInv.Status = "Paid"
 						} else if downInv.PaidAmount > 0 {
 							downInv.Status = "Partially_Paid"
@@ -926,7 +946,7 @@ func (s *CustomerService) enrichCustomersBatch(customers []models.Customer) {
 	var arrearsRows []ArrearsRow
 	s.db.Model(&models.Invoice{}).
 		Select("customer_id, COALESCE(SUM(remaining_amount), 0) as remaining_total").
-		Where("customer_id IN (?) AND status IN ('Unpaid', 'Partially_Paid')", customerIDs).
+		Where("customer_id IN (?) AND (status IN ('Unpaid', 'Partially_Paid') OR remaining_amount < 0)", customerIDs).
 		Group("customer_id").
 		Scan(&arrearsRows)
 
@@ -1020,7 +1040,7 @@ func (s *CustomerService) enrichCustomerCalculations(c *models.Customer) {
 	}
 	s.db.Model(&models.Invoice{}).
 		Select("COALESCE(SUM(remaining_amount), 0) as remaining_total").
-		Where("customer_id = ? AND status IN ('Unpaid', 'Partially_Paid')", c.ID).
+		Where("customer_id = ? AND (status IN ('Unpaid', 'Partially_Paid') OR remaining_amount < 0)", c.ID).
 		Scan(&invoiceSummary)
 
 	var creditSummary struct {

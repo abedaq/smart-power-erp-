@@ -71,7 +71,6 @@ CREATE FUNCTION public.fn_calculate_cycle_financials(p_current_reading numeric, 
 DECLARE
   v_curr     NUMERIC(12,2) := COALESCE(p_current_reading, 0.00);
   v_prev     NUMERIC(12,2) := COALESCE(p_previous_reading, 0.00);
-  v_lost     NUMERIC(12,2) := GREATEST(0.00, COALESCE(p_lost_units, 0.00));
   v_price    NUMERIC(12,2) := GREATEST(0.00, COALESCE(p_unit_price, 0.00));
   v_fee      NUMERIC(12,2) := GREATEST(0.00, COALESCE(p_service_fee, 0.00));
   v_arrears  NUMERIC(12,2) := COALESCE(p_arrears, 0.00);
@@ -79,7 +78,6 @@ DECLARE
   
   v_cons     NUMERIC(12,2);
   v_cons_val NUMERIC(12,2);
-  v_lost_val NUMERIC(12,2);
   v_due      NUMERIC(12,2);
   v_rem      NUMERIC(12,2);
   v_status   TEXT;
@@ -87,12 +85,11 @@ BEGIN
   -- 1. Net Consumption
   v_cons := GREATEST(0.00, ROUND(v_curr - v_prev, 2));
   
-  -- 2. Net Consumption Cost & Lost Units Cost
+  -- 2. Net Consumption Cost
   v_cons_val := ROUND(v_cons * v_price, 2);
-  v_lost_val := ROUND(v_lost * v_price, 2);
   
-  -- 3. Total Due = Consumption Cost + Lost Units Cost + Service Fee + Arrears
-  v_due := ROUND(v_cons_val + v_lost_val + v_fee + v_arrears, 2);
+  -- 3. Total Due = Consumption Cost + Service Fee + Arrears (lost units cost eliminated)
+  v_due := ROUND(v_cons_val + v_fee + v_arrears, 2);
   
   -- 4. Remaining Balance
   v_rem := GREATEST(0.00, ROUND(v_due - v_paid, 2));
@@ -106,7 +103,7 @@ BEGIN
     v_status := 'Unpaid';
   END IF;
 
-  RETURN QUERY SELECT v_cons, v_cons_val, v_lost_val, v_due, v_rem, v_status;
+  RETURN QUERY SELECT v_cons, v_cons_val, 0.00::NUMERIC, v_due, v_rem, v_status;
 END;
 $$;
 
@@ -230,254 +227,8 @@ $$;
 CREATE FUNCTION public.rpc_recalculate_customer_cascade(p_customer_id integer, p_trigger_invoice_id integer DEFAULT NULL::integer, p_trigger_reading_id integer DEFAULT NULL::integer, p_updates jsonb DEFAULT '{}'::jsonb, p_actor_user_id integer DEFAULT NULL::integer, p_is_meter_reset boolean DEFAULT false) RETURNS jsonb
     LANGUAGE plpgsql
     AS $$
-DECLARE
-  v_customer             RECORD;
-  v_invoices             public.invoices[];
-  v_inv                  public.invoices;
-  v_target_idx           INT := -1;
-  v_affected_cycles      TEXT[] := ARRAY[]::TEXT[];
-  v_updated_summaries    JSONB[] := ARRAY[]::JSONB[];
-  
-  -- Calculation variables per cycle
-  v_curr_reading         NUMERIC(12,2);
-  v_prev_reading         NUMERIC(12,2);
-  v_lost_units           NUMERIC(12,2);
-  v_unit_price           NUMERIC(12,2);
-  v_service_fee          NUMERIC(12,2);
-  v_arrears              NUMERIC(12,2);
-  v_paid_amount          NUMERIC(12,2);
-  
-  v_calc                 RECORD;
-  
-  -- Cascading memory between cycles
-  v_cascade_reading      NUMERIC(12,2);
-  v_cascade_arrears      NUMERIC(12,2);
-  
-  v_total_invoices_count INT := 0;
 BEGIN
-  -- 1. Pessimistic Lock on Customer
-  IF p_customer_id IS NULL OR p_customer_id <= 0 THEN
-    RAISE EXCEPTION 'معرف المشترك غير صحيح (%)', p_customer_id;
-  END IF;
-
-  SELECT * INTO v_customer 
-  FROM public.customers 
-  WHERE id = p_customer_id 
-  FOR UPDATE;
-
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'المشترك غير موجود برقم (%)', p_customer_id;
-  END IF;
-
-  -- 2. Fetch and Lock Active Customer Invoices Chronologically
-  SELECT ARRAY(
-    SELECT inv
-    FROM public.invoices inv
-    WHERE inv.customer_id = p_customer_id
-      AND inv.approval_status != 'REJECTED'
-      AND inv.status != 'Void'
-    ORDER BY inv.created_at ASC, inv.id ASC
-    FOR UPDATE
-  ) INTO v_invoices;
-
-  v_total_invoices_count := COALESCE(array_length(v_invoices, 1), 0);
-
-  IF v_total_invoices_count = 0 THEN
-    RETURN jsonb_build_object(
-      'success', true,
-      'customer_id', p_customer_id,
-      'affected_cycles', '[]'::jsonb,
-      'updated_invoices', '[]'::jsonb,
-      'final_customer_balance', 0.00,
-      'message', 'لا توجد فواتير مسجلة للمشترك'
-    );
-  END IF;
-
-  -- 3. Determine Trigger Cycle Index
-  IF p_trigger_invoice_id IS NOT NULL THEN
-    FOR i IN 1..v_total_invoices_count LOOP
-      IF v_invoices[i].id = p_trigger_invoice_id THEN
-        v_target_idx := i;
-        EXIT;
-      END IF;
-    END LOOP;
-  ELSIF p_trigger_reading_id IS NOT NULL THEN
-    FOR i IN 1..v_total_invoices_count LOOP
-      IF v_invoices[i].reading_id = p_trigger_reading_id THEN
-        v_target_idx := i;
-        EXIT;
-      END IF;
-    END LOOP;
-  ELSE
-    v_target_idx := 1;
-  END IF;
-
-  IF v_target_idx = -1 THEN
-    RAISE EXCEPTION 'لم يتم العثور على الفاتورة أو القراءة المستهدفة ضمن سجلات المشترك';
-  END IF;
-
-  -- 4. Initialize Cascading Indicators before Trigger Cycle T
-  IF v_target_idx > 1 THEN
-    v_cascade_reading := v_invoices[v_target_idx - 1].current_reading;
-    v_cascade_arrears := v_invoices[v_target_idx - 1].remaining_amount;
-  ELSE
-    v_cascade_reading := COALESCE(v_customer.initial_reading, 0.00);
-    v_cascade_arrears := 0.00;
-  END IF;
-
-  -- 5. Cascade Loop from Cycle T to Cycle N
-  FOR i IN v_target_idx..v_total_invoices_count LOOP
-    v_inv := v_invoices[i];
-
-    IF i = v_target_idx THEN
-      -- Trigger Cycle T: Apply new updates or keep existing
-      v_curr_reading := COALESCE((p_updates->>'current_reading')::NUMERIC, v_inv.current_reading);
-      
-      IF (p_updates->>'previous_reading') IS NOT NULL THEN
-        v_prev_reading := (p_updates->>'previous_reading')::NUMERIC;
-      ELSE
-        v_prev_reading := CASE WHEN i > 1 THEN v_cascade_reading ELSE v_inv.previous_reading END;
-      END IF;
-
-      -- Check Monotonic Guard
-      IF v_curr_reading < v_prev_reading AND NOT p_is_meter_reset THEN
-        RAISE EXCEPTION 'القراءة الحالية (%) لا يمكن أن تكون أقل من القراءة السابقة (%) في الدورة (%)',
-          v_curr_reading, v_prev_reading, COALESCE(v_inv.billing_cycle, v_inv.id::TEXT);
-      END IF;
-
-      v_lost_units  := COALESCE((p_updates->>'lost_units')::NUMERIC, v_inv.lost_units, 0.00);
-      v_unit_price  := COALESCE((p_updates->>'unit_price')::NUMERIC, (p_updates->>'kwh_price')::NUMERIC, v_inv.kwh_price_snapshot);
-      v_service_fee := COALESCE((p_updates->>'service_fee')::NUMERIC, (p_updates->>'fixed_fee')::NUMERIC, v_inv.fixed_fee_snapshot);
-      
-      IF (p_updates->>'arrears') IS NOT NULL THEN
-        v_arrears := (p_updates->>'arrears')::NUMERIC;
-      ELSE
-        v_arrears := CASE WHEN i > 1 THEN v_cascade_arrears ELSE v_inv.arrears END;
-      END IF;
-
-      v_paid_amount := COALESCE((p_updates->>'paid_amount')::NUMERIC, v_inv.paid_amount);
-
-    ELSE
-      -- Subsequent Cycles (T+1 .. N): Automatically inherit previous reading & arrears
-      v_prev_reading := v_cascade_reading;
-      v_arrears      := v_cascade_arrears;
-      v_curr_reading := v_inv.current_reading;
-
-      -- Downstream Monotonic Guard
-      IF v_curr_reading < v_prev_reading AND NOT p_is_meter_reset THEN
-        RAISE EXCEPTION 'تعديل القراءة للدورة السابقة إلى (%) يتعارض مع القراءة المسجلة للدورة اللاحقة (%) البالغة (%)',
-          v_prev_reading, COALESCE(v_inv.billing_cycle, v_inv.id::TEXT), v_curr_reading;
-      END IF;
-
-      v_lost_units  := COALESCE(v_inv.lost_units, 0.00);
-      v_unit_price  := v_inv.kwh_price_snapshot;
-      v_service_fee := v_inv.fixed_fee_snapshot;
-      v_paid_amount := v_inv.paid_amount;
-    END IF;
-
-    -- Calculate Cycle Financials
-    SELECT * INTO v_calc 
-    FROM public.fn_calculate_cycle_financials(
-      v_curr_reading,
-      v_prev_reading,
-      v_lost_units,
-      v_unit_price,
-      v_service_fee,
-      v_arrears,
-      v_paid_amount
-    );
-
-    -- Update Invoice Record
-    UPDATE public.invoices
-    SET previous_reading   = v_prev_reading,
-        current_reading    = v_curr_reading,
-        consumption        = v_calc.consumption,
-        lost_units         = v_lost_units,
-        consumption_value  = v_calc.consumption_cost,
-        lost_units_value   = v_calc.lost_units_cost,
-        kwh_price_snapshot = v_unit_price,
-        fixed_fee_snapshot = v_service_fee,
-        arrears            = v_arrears,
-        total_due          = v_calc.total_due,
-        total_amount       = v_calc.total_due,
-        paid_amount        = v_paid_amount,
-        remaining_amount   = v_calc.remaining_amount,
-        status             = v_calc.status,
-        updated_at         = CURRENT_TIMESTAMP
-    WHERE id = v_inv.id;
-
-    -- Update Meter Reading if linked
-    IF v_inv.reading_id IS NOT NULL THEN
-      UPDATE public.meter_readings
-      SET reading_value = v_curr_reading,
-          previous_reading = v_prev_reading,
-          consumption = v_calc.consumption,
-          lost_units = v_lost_units,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = v_inv.reading_id;
-    END IF;
-
-    -- Record Affected Cycle
-    v_affected_cycles := array_append(v_affected_cycles, COALESCE(v_inv.billing_cycle, 'دورة-' || v_inv.id));
-
-    v_updated_summaries := array_append(v_updated_summaries, jsonb_build_object(
-      'invoice_id', v_inv.id,
-      'reading_id', v_inv.reading_id,
-      'cycle', COALESCE(v_inv.billing_cycle, 'دورة-' || v_inv.id),
-      'previous_reading', v_prev_reading,
-      'current_reading', v_curr_reading,
-      'consumption', v_calc.consumption,
-      'lost_units', v_lost_units,
-      'unit_price', v_unit_price,
-      'service_fee', v_service_fee,
-      'arrears', v_arrears,
-      'total_due', v_calc.total_due,
-      'paid_amount', v_paid_amount,
-      'remaining_amount', v_calc.remaining_amount,
-      'status', v_calc.status
-    ));
-
-    -- Update Cascading Indicators for next cycle
-    v_cascade_reading := v_curr_reading;
-    v_cascade_arrears := v_calc.remaining_amount;
-  END LOOP;
-
-  -- 6. Update Final Customer Balance & Initial Reading if T=1
-  UPDATE public.customers
-  SET initial_reading = CASE WHEN v_target_idx = 1 AND (p_updates->>'previous_reading') IS NOT NULL 
-                             THEN (p_updates->>'previous_reading')::NUMERIC 
-                             ELSE initial_reading END,
-      last_reading = v_cascade_reading,
-      total_due = v_cascade_arrears,
-      updated_at = CURRENT_TIMESTAMP
-  WHERE id = p_customer_id;
-
-  -- 7. Audit Logging
-  INSERT INTO public.audit_logs (
-    user_id, action, entity, entity_id, details, created_at
-  ) VALUES (
-    p_actor_user_id,
-    'RECALCULATE_CASCADE',
-    'CUSTOMER',
-    p_customer_id::TEXT,
-    jsonb_build_object(
-      'trigger_invoice_id', p_trigger_invoice_id,
-      'trigger_reading_id', p_trigger_reading_id,
-      'affected_cycles', to_jsonb(v_affected_cycles),
-      'affected_count', array_length(v_affected_cycles, 1),
-      'final_customer_balance', v_cascade_arrears,
-      'is_meter_reset', p_is_meter_reset
-    )::TEXT,
-    CURRENT_TIMESTAMP
-  );
-
-  RETURN jsonb_build_object(
-    'success', true,
-    'customer_id', p_customer_id,
-    'affected_cycles', to_jsonb(v_affected_cycles),
-    'updated_invoices', to_jsonb(v_updated_summaries),
-    'final_customer_balance', v_cascade_arrears
-  );
+    RAISE EXCEPTION 'DEPRECATED: Financial business logic is centralized in the Go backend engine (payment_service.go / billing_service.go).' USING ERRCODE = 'feature_not_supported';
 END;
 $$;
 
@@ -489,254 +240,8 @@ $$;
 CREATE FUNCTION public.rpc_recalculate_customer_cascade(p_customer_id bigint, p_trigger_invoice_id bigint DEFAULT NULL::bigint, p_trigger_reading_id bigint DEFAULT NULL::bigint, p_updates jsonb DEFAULT '{}'::jsonb, p_actor_user_id bigint DEFAULT NULL::bigint, p_is_meter_reset boolean DEFAULT false) RETURNS jsonb
     LANGUAGE plpgsql
     AS $$
-DECLARE
-  v_customer             RECORD;
-  v_invoices             public.invoices[];
-  v_inv                  public.invoices;
-  v_target_idx           INT := -1;
-  v_affected_cycles      TEXT[] := ARRAY[]::TEXT[];
-  v_updated_summaries    JSONB[] := ARRAY[]::JSONB[];
-  
-  -- Calculation variables per cycle
-  v_curr_reading         NUMERIC(12,2);
-  v_prev_reading         NUMERIC(12,2);
-  v_lost_units           NUMERIC(12,2);
-  v_unit_price           NUMERIC(12,2);
-  v_service_fee          NUMERIC(12,2);
-  v_arrears              NUMERIC(12,2);
-  v_paid_amount          NUMERIC(12,2);
-  
-  v_calc                 RECORD;
-  
-  -- Cascading memory between cycles
-  v_cascade_reading      NUMERIC(12,2);
-  v_cascade_arrears      NUMERIC(12,2);
-  
-  v_total_invoices_count INT := 0;
 BEGIN
-  -- 1. Pessimistic Lock on Customer
-  IF p_customer_id IS NULL OR p_customer_id <= 0 THEN
-    RAISE EXCEPTION 'معرف المشترك غير صحيح (%)', p_customer_id;
-  END IF;
-
-  SELECT * INTO v_customer 
-  FROM public.customers 
-  WHERE id = p_customer_id 
-  FOR UPDATE;
-
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'المشترك غير موجود برقم (%)', p_customer_id;
-  END IF;
-
-  -- 2. Fetch and Lock Active Customer Invoices Chronologically
-  SELECT ARRAY(
-    SELECT inv
-    FROM public.invoices inv
-    WHERE inv.customer_id = p_customer_id
-      AND inv.approval_status != 'REJECTED'
-      AND inv.status != 'Void'
-    ORDER BY inv.created_at ASC, inv.id ASC
-    FOR UPDATE
-  ) INTO v_invoices;
-
-  v_total_invoices_count := COALESCE(array_length(v_invoices, 1), 0);
-
-  IF v_total_invoices_count = 0 THEN
-    RETURN jsonb_build_object(
-      'success', true,
-      'customer_id', p_customer_id,
-      'affected_cycles', '[]'::jsonb,
-      'updated_invoices', '[]'::jsonb,
-      'final_customer_balance', 0.00,
-      'message', 'لا توجد فواتير مسجلة للمشترك'
-    );
-  END IF;
-
-  -- 3. Determine Trigger Cycle Index
-  IF p_trigger_invoice_id IS NOT NULL THEN
-    FOR i IN 1..v_total_invoices_count LOOP
-      IF v_invoices[i].id = p_trigger_invoice_id THEN
-        v_target_idx := i;
-        EXIT;
-      END IF;
-    END LOOP;
-  ELSIF p_trigger_reading_id IS NOT NULL THEN
-    FOR i IN 1..v_total_invoices_count LOOP
-      IF v_invoices[i].reading_id = p_trigger_reading_id THEN
-        v_target_idx := i;
-        EXIT;
-      END IF;
-    END LOOP;
-  ELSE
-    v_target_idx := 1;
-  END IF;
-
-  IF v_target_idx = -1 THEN
-    RAISE EXCEPTION 'لم يتم العثور على الفاتورة أو القراءة المستهدفة ضمن سجلات المشترك';
-  END IF;
-
-  -- 4. Initialize Cascading Indicators before Trigger Cycle T
-  IF v_target_idx > 1 THEN
-    v_cascade_reading := v_invoices[v_target_idx - 1].current_reading;
-    v_cascade_arrears := v_invoices[v_target_idx - 1].remaining_amount;
-  ELSE
-    v_cascade_reading := COALESCE(v_customer.initial_reading, 0.00);
-    v_cascade_arrears := 0.00;
-  END IF;
-
-  -- 5. Cascade Loop from Cycle T to Cycle N
-  FOR i IN v_target_idx..v_total_invoices_count LOOP
-    v_inv := v_invoices[i];
-
-    IF i = v_target_idx THEN
-      -- Trigger Cycle T: Apply new updates or keep existing
-      v_curr_reading := COALESCE((p_updates->>'current_reading')::NUMERIC, v_inv.current_reading);
-      
-      IF (p_updates->>'previous_reading') IS NOT NULL THEN
-        v_prev_reading := (p_updates->>'previous_reading')::NUMERIC;
-      ELSE
-        v_prev_reading := CASE WHEN i > 1 THEN v_cascade_reading ELSE v_inv.previous_reading END;
-      END IF;
-
-      -- Check Monotonic Guard
-      IF v_curr_reading < v_prev_reading AND NOT p_is_meter_reset THEN
-        RAISE EXCEPTION 'القراءة الحالية (%) لا يمكن أن تكون أقل من القراءة السابقة (%) في الدورة (%)',
-          v_curr_reading, v_prev_reading, COALESCE(v_inv.billing_cycle, v_inv.id::TEXT);
-      END IF;
-
-      v_lost_units  := COALESCE((p_updates->>'lost_units')::NUMERIC, v_inv.lost_units, 0.00);
-      v_unit_price  := COALESCE((p_updates->>'unit_price')::NUMERIC, (p_updates->>'kwh_price')::NUMERIC, v_inv.kwh_price_snapshot);
-      v_service_fee := COALESCE((p_updates->>'service_fee')::NUMERIC, (p_updates->>'fixed_fee')::NUMERIC, v_inv.fixed_fee_snapshot);
-      
-      IF (p_updates->>'arrears') IS NOT NULL THEN
-        v_arrears := (p_updates->>'arrears')::NUMERIC;
-      ELSE
-        v_arrears := CASE WHEN i > 1 THEN v_cascade_arrears ELSE v_inv.arrears END;
-      END IF;
-
-      v_paid_amount := COALESCE((p_updates->>'paid_amount')::NUMERIC, v_inv.paid_amount);
-
-    ELSE
-      -- Subsequent Cycles (T+1 .. N): Automatically inherit previous reading & arrears
-      v_prev_reading := v_cascade_reading;
-      v_arrears      := v_cascade_arrears;
-      v_curr_reading := v_inv.current_reading;
-
-      -- Downstream Monotonic Guard
-      IF v_curr_reading < v_prev_reading AND NOT p_is_meter_reset THEN
-        RAISE EXCEPTION 'تعديل القراءة للدورة السابقة إلى (%) يتعارض مع القراءة المسجلة للدورة اللاحقة (%) البالغة (%)',
-          v_prev_reading, COALESCE(v_inv.billing_cycle, v_inv.id::TEXT), v_curr_reading;
-      END IF;
-
-      v_lost_units  := COALESCE(v_inv.lost_units, 0.00);
-      v_unit_price  := v_inv.kwh_price_snapshot;
-      v_service_fee := v_inv.fixed_fee_snapshot;
-      v_paid_amount := v_inv.paid_amount;
-    END IF;
-
-    -- Calculate Cycle Financials
-    SELECT * INTO v_calc 
-    FROM public.fn_calculate_cycle_financials(
-      v_curr_reading,
-      v_prev_reading,
-      v_lost_units,
-      v_unit_price,
-      v_service_fee,
-      v_arrears,
-      v_paid_amount
-    );
-
-    -- Update Invoice Record
-    UPDATE public.invoices
-    SET previous_reading   = v_prev_reading,
-        current_reading    = v_curr_reading,
-        consumption        = v_calc.consumption,
-        lost_units         = v_lost_units,
-        consumption_value  = v_calc.consumption_cost,
-        lost_units_value   = v_calc.lost_units_cost,
-        kwh_price_snapshot = v_unit_price,
-        fixed_fee_snapshot = v_service_fee,
-        arrears            = v_arrears,
-        total_due          = v_calc.total_due,
-        total_amount       = v_calc.total_due,
-        paid_amount        = v_paid_amount,
-        remaining_amount   = v_calc.remaining_amount,
-        status             = v_calc.status,
-        updated_at         = CURRENT_TIMESTAMP
-    WHERE id = v_inv.id;
-
-    -- Update Meter Reading if linked
-    IF v_inv.reading_id IS NOT NULL THEN
-      UPDATE public.meter_readings
-      SET reading_value = v_curr_reading,
-          previous_reading = v_prev_reading,
-          consumption = v_calc.consumption,
-          lost_units = v_lost_units,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = v_inv.reading_id;
-    END IF;
-
-    -- Record Affected Cycle
-    v_affected_cycles := array_append(v_affected_cycles, COALESCE(v_inv.billing_cycle, 'دورة-' || v_inv.id));
-
-    v_updated_summaries := array_append(v_updated_summaries, jsonb_build_object(
-      'invoice_id', v_inv.id,
-      'reading_id', v_inv.reading_id,
-      'cycle', COALESCE(v_inv.billing_cycle, 'دورة-' || v_inv.id),
-      'previous_reading', v_prev_reading,
-      'current_reading', v_curr_reading,
-      'consumption', v_calc.consumption,
-      'lost_units', v_lost_units,
-      'unit_price', v_unit_price,
-      'service_fee', v_service_fee,
-      'arrears', v_arrears,
-      'total_due', v_calc.total_due,
-      'paid_amount', v_paid_amount,
-      'remaining_amount', v_calc.remaining_amount,
-      'status', v_calc.status
-    ));
-
-    -- Update Cascading Indicators for next cycle
-    v_cascade_reading := v_curr_reading;
-    v_cascade_arrears := v_calc.remaining_amount;
-  END LOOP;
-
-  -- 6. Update Final Customer Balance & Initial Reading if T=1
-  UPDATE public.customers
-  SET initial_reading = CASE WHEN v_target_idx = 1 AND (p_updates->>'previous_reading') IS NOT NULL 
-                             THEN (p_updates->>'previous_reading')::NUMERIC 
-                             ELSE initial_reading END,
-      last_reading = v_cascade_reading,
-      total_due = v_cascade_arrears,
-      updated_at = CURRENT_TIMESTAMP
-  WHERE id = p_customer_id;
-
-  -- 7. Audit Logging
-  INSERT INTO public.audit_logs (
-    user_id, action, entity, entity_id, details, created_at
-  ) VALUES (
-    p_actor_user_id,
-    'RECALCULATE_CASCADE',
-    'CUSTOMER',
-    p_customer_id::TEXT,
-    jsonb_build_object(
-      'trigger_invoice_id', p_trigger_invoice_id,
-      'trigger_reading_id', p_trigger_reading_id,
-      'affected_cycles', to_jsonb(v_affected_cycles),
-      'affected_count', array_length(v_affected_cycles, 1),
-      'final_customer_balance', v_cascade_arrears,
-      'is_meter_reset', p_is_meter_reset
-    )::TEXT,
-    CURRENT_TIMESTAMP
-  );
-
-  RETURN jsonb_build_object(
-    'success', true,
-    'customer_id', p_customer_id,
-    'affected_cycles', to_jsonb(v_affected_cycles),
-    'updated_invoices', to_jsonb(v_updated_summaries),
-    'final_customer_balance', v_cascade_arrears
-  );
+    RAISE EXCEPTION 'DEPRECATED: Financial business logic is centralized in the Go backend engine (payment_service.go / billing_service.go).' USING ERRCODE = 'feature_not_supported';
 END;
 $$;
 
@@ -1171,173 +676,8 @@ CREATE FUNCTION public.rpc_submit_payment(p_customer_id integer, p_amount_paid n
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public', 'pg_temp'
     AS $$
-DECLARE
-  v_existing_json JSON;
-  v_receipt_number TEXT;
-  v_payment_id BIGINT;
-  v_next_val BIGINT;
-  v_current_year INT;
-  v_remaining_to_distribute NUMERIC(12,2);
-  v_invoice RECORD;
-  v_allocated_amount NUMERIC(12,2);
-  v_new_paid NUMERIC(12,2);
-  v_new_remaining NUMERIC(12,2);
-  v_new_status TEXT;
-  v_allocation_id BIGINT;
-  v_customer RECORD;
-  v_updated_debt NUMERIC(12,2);
-  v_allocations JSONB := '[]'::jsonb;
-  v_credit_amount NUMERIC(12,2) := 0.00;
-  v_total_credit_available NUMERIC(12,2) := 0.00;
 BEGIN
-  -- 1. Idempotency Check
-  SELECT row_to_json(pm) INTO v_existing_json 
-  FROM public.payments pm 
-  WHERE pm.client_mutation_id = p_idempotency_key;
-  
-  IF FOUND THEN
-    RETURN json_build_object('success', true, 'is_duplicate', true, 'data', v_existing_json);
-  END IF;
-
-  -- 2. Validate Amount
-  IF p_amount_paid IS NULL OR p_amount_paid <= 0 THEN
-    RAISE EXCEPTION 'مبلغ السداد يجب أن يكون أكبر من الصفر' USING ERRCODE = 'check_violation';
-  END IF;
-
-  -- 3. Pessimistic Lock Level 1: Lock Customer Row
-  SELECT * INTO v_customer 
-  FROM public.customers 
-  WHERE id = p_customer_id 
-  FOR UPDATE;
-  
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'المشترك رقم % غير موجود في النظام', p_customer_id;
-  END IF;
-
-  -- 4. Generate Deterministic Sequential Receipt Number
-  v_current_year := EXTRACT(YEAR FROM p_payment_date)::INT;
-  
-  INSERT INTO public.payment_receipt_counters (year, last_value)
-  VALUES (v_current_year, 1)
-  ON CONFLICT (year) DO UPDATE 
-  SET last_value = public.payment_receipt_counters.last_value + 1
-  RETURNING last_value INTO v_next_val;
-
-  v_receipt_number := 'REC-' || v_current_year || '-' || LPAD(v_next_val::TEXT, 5, '0');
-
-  -- 5. Insert Primary Payment Record
-  INSERT INTO public.payments (
-    customer_id, invoice_id, shift_id, receipt_number, payment_method,
-    amount_paid, payment_date, accountant_name, accountant_user_id,
-    approval_status, notes, client_mutation_id
-  ) VALUES (
-    p_customer_id, p_invoice_id, p_shift_id, v_receipt_number, COALESCE(p_payment_method, 'CASH'),
-    ROUND(p_amount_paid, 2), p_payment_date, p_collector_name, p_actor_user_id,
-    'APPROVED', p_notes, p_idempotency_key
-  ) RETURNING id INTO v_payment_id;
-
-  -- 6. Pessimistic Lock Level 2: Strict FIFO Waterfall Allocation ORDER BY due_date ASC, id ASC FOR UPDATE
-  v_remaining_to_distribute := ROUND(p_amount_paid, 2);
-
-  FOR v_invoice IN 
-    SELECT * FROM public.invoices 
-    WHERE customer_id = p_customer_id
-      AND status IN ('Unpaid', 'Partially_Paid')
-      AND approval_status = 'APPROVED'
-      AND (p_invoice_id IS NULL OR id = p_invoice_id)
-    ORDER BY due_date ASC, id ASC
-    FOR UPDATE
-  LOOP
-    IF v_remaining_to_distribute <= 0 THEN
-      EXIT;
-    END IF;
-
-    v_allocated_amount := LEAST(v_remaining_to_distribute, v_invoice.remaining_amount);
-    
-    IF v_allocated_amount > 0 THEN
-      v_new_paid := ROUND(v_invoice.paid_amount + v_allocated_amount, 2);
-      v_new_remaining := GREATEST(0.00, ROUND(v_invoice.remaining_amount - v_allocated_amount, 2));
-      v_new_status := CASE WHEN v_new_remaining <= 0 THEN 'Paid' ELSE 'Partially_Paid' END;
-
-      UPDATE public.invoices 
-      SET paid_amount = v_new_paid,
-          remaining_amount = v_new_remaining,
-          status = v_new_status,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = v_invoice.id;
-
-      INSERT INTO public.payment_allocations (
-        payment_id, invoice_id, amount_allocated, is_reversed, created_at
-      ) VALUES (
-        v_payment_id, v_invoice.id, v_allocated_amount, FALSE, p_payment_date
-      ) RETURNING id INTO v_allocation_id;
-
-      v_allocations := v_allocations || jsonb_build_object(
-        'invoice_id', v_invoice.id,
-        'invoice_number', v_invoice.invoice_number,
-        'billing_cycle', v_invoice.billing_cycle,
-        'amount_allocated', v_allocated_amount,
-        'new_remaining', v_new_remaining,
-        'status', v_new_status
-      );
-
-      v_remaining_to_distribute := ROUND(v_remaining_to_distribute - v_allocated_amount, 2);
-    END IF;
-  END LOOP;
-
-  -- 7. Handle Overpayment: Credit Ledger Deposit
-  IF v_remaining_to_distribute > 0 THEN
-    v_credit_amount := v_remaining_to_distribute;
-    
-    INSERT INTO public.customer_credits (
-      customer_id, payment_id, amount, remaining_amount, status, created_at
-    ) VALUES (
-      p_customer_id, v_payment_id, v_credit_amount, v_credit_amount, 'AVAILABLE', p_payment_date
-    );
-
-    UPDATE public.customers
-    SET balance = ROUND(balance + v_credit_amount, 2),
-        updated_at = CURRENT_TIMESTAMP
-    WHERE id = p_customer_id;
-  END IF;
-
-  -- 8. Recalculate Total Remaining Debt and Total Available Credit
-  SELECT COALESCE(SUM(remaining_amount), 0.00) INTO v_updated_debt 
-  FROM public.invoices
-  WHERE customer_id = p_customer_id AND status IN ('Unpaid', 'Partially_Paid') AND approval_status = 'APPROVED';
-
-  SELECT COALESCE(SUM(remaining_amount), 0.00) INTO v_total_credit_available
-  FROM public.customer_credits
-  WHERE customer_id = p_customer_id AND status = 'AVAILABLE';
-
-  UPDATE public.customers
-  SET total_due = v_updated_debt,
-      updated_at = CURRENT_TIMESTAMP
-  WHERE id = p_customer_id;
-
-  -- 9. Security Audit Logging
-  INSERT INTO public.audit_logs (
-    action, entity, entity_id, user_id, details, created_at
-  ) VALUES (
-    'PAYMENT_SUBMIT_FIFO', 'Payment', v_payment_id::TEXT, p_actor_user_id,
-    'تحصيل دفعة مالية بقيمة ' || p_amount_paid || ' ر.ي للمشترك: ' || v_customer.full_name || 
-    ' (سند رقم: ' || v_receipt_number || ')' ||
-    CASE WHEN v_credit_amount > 0 THEN ' [رصيد دائن فائض: ' || v_credit_amount || ' ر.ي]' ELSE '' END ||
-    ' المتبقي الكلي للمشترك: ' || v_updated_debt || ' ر.ي',
-    p_payment_date
-  );
-
-  RETURN json_build_object(
-    'success', true,
-    'is_duplicate', false,
-    'payment_id', v_payment_id,
-    'receipt_number', v_receipt_number,
-    'allocated_total', ROUND(p_amount_paid - v_credit_amount, 2),
-    'credit_balance', v_credit_amount,
-    'total_credit_available', v_total_credit_available,
-    'remaining_debt', v_updated_debt,
-    'allocations', v_allocations
-  );
+    RAISE EXCEPTION 'DEPRECATED: Financial transactions must be processed via Go backend engine (payment_service.go).' USING ERRCODE = 'feature_not_supported';
 END;
 $$;
 
@@ -1350,173 +690,8 @@ CREATE FUNCTION public.rpc_submit_payment(p_customer_id bigint, p_amount_paid nu
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public', 'pg_temp'
     AS $$
-DECLARE
-  v_existing_json JSON;
-  v_receipt_number TEXT;
-  v_payment_id BIGINT;
-  v_next_val BIGINT;
-  v_current_year INT;
-  v_remaining_to_distribute NUMERIC(12,2);
-  v_invoice RECORD;
-  v_allocated_amount NUMERIC(12,2);
-  v_new_paid NUMERIC(12,2);
-  v_new_remaining NUMERIC(12,2);
-  v_new_status TEXT;
-  v_allocation_id BIGINT;
-  v_customer RECORD;
-  v_updated_debt NUMERIC(12,2);
-  v_allocations JSONB := '[]'::jsonb;
-  v_credit_amount NUMERIC(12,2) := 0.00;
-  v_total_credit_available NUMERIC(12,2) := 0.00;
 BEGIN
-  -- 1. Idempotency Check
-  SELECT row_to_json(pm) INTO v_existing_json 
-  FROM public.payments pm 
-  WHERE pm.client_mutation_id = p_idempotency_key;
-  
-  IF FOUND THEN
-    RETURN json_build_object('success', true, 'is_duplicate', true, 'data', v_existing_json);
-  END IF;
-
-  -- 2. Validate Amount
-  IF p_amount_paid IS NULL OR p_amount_paid <= 0 THEN
-    RAISE EXCEPTION 'مبلغ السداد يجب أن يكون أكبر من الصفر' USING ERRCODE = 'check_violation';
-  END IF;
-
-  -- 3. Pessimistic Lock Level 1: Lock Customer Row
-  SELECT * INTO v_customer 
-  FROM public.customers 
-  WHERE id = p_customer_id 
-  FOR UPDATE;
-  
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'المشترك رقم % غير موجود في النظام', p_customer_id;
-  END IF;
-
-  -- 4. Generate Deterministic Sequential Receipt Number
-  v_current_year := EXTRACT(YEAR FROM p_payment_date)::INT;
-  
-  INSERT INTO public.payment_receipt_counters (year, last_value)
-  VALUES (v_current_year, 1)
-  ON CONFLICT (year) DO UPDATE 
-  SET last_value = public.payment_receipt_counters.last_value + 1
-  RETURNING last_value INTO v_next_val;
-
-  v_receipt_number := 'REC-' || v_current_year || '-' || LPAD(v_next_val::TEXT, 5, '0');
-
-  -- 5. Insert Primary Payment Record
-  INSERT INTO public.payments (
-    customer_id, invoice_id, shift_id, receipt_number, payment_method,
-    amount_paid, payment_date, accountant_name, accountant_user_id,
-    approval_status, notes, client_mutation_id
-  ) VALUES (
-    p_customer_id, p_invoice_id, p_shift_id, v_receipt_number, COALESCE(p_payment_method, 'CASH'),
-    ROUND(p_amount_paid, 2), p_payment_date, p_collector_name, p_actor_user_id,
-    'APPROVED', p_notes, p_idempotency_key
-  ) RETURNING id INTO v_payment_id;
-
-  -- 6. Pessimistic Lock Level 2: Strict FIFO Waterfall Allocation ORDER BY due_date ASC, id ASC FOR UPDATE
-  v_remaining_to_distribute := ROUND(p_amount_paid, 2);
-
-  FOR v_invoice IN 
-    SELECT * FROM public.invoices 
-    WHERE customer_id = p_customer_id
-      AND status IN ('Unpaid', 'Partially_Paid')
-      AND approval_status = 'APPROVED'
-      AND (p_invoice_id IS NULL OR id = p_invoice_id)
-    ORDER BY due_date ASC, id ASC
-    FOR UPDATE
-  LOOP
-    IF v_remaining_to_distribute <= 0 THEN
-      EXIT;
-    END IF;
-
-    v_allocated_amount := LEAST(v_remaining_to_distribute, v_invoice.remaining_amount);
-    
-    IF v_allocated_amount > 0 THEN
-      v_new_paid := ROUND(v_invoice.paid_amount + v_allocated_amount, 2);
-      v_new_remaining := GREATEST(0.00, ROUND(v_invoice.remaining_amount - v_allocated_amount, 2));
-      v_new_status := CASE WHEN v_new_remaining <= 0 THEN 'Paid' ELSE 'Partially_Paid' END;
-
-      UPDATE public.invoices 
-      SET paid_amount = v_new_paid,
-          remaining_amount = v_new_remaining,
-          status = v_new_status,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = v_invoice.id;
-
-      INSERT INTO public.payment_allocations (
-        payment_id, invoice_id, amount_allocated, is_reversed, created_at
-      ) VALUES (
-        v_payment_id, v_invoice.id, v_allocated_amount, FALSE, p_payment_date
-      ) RETURNING id INTO v_allocation_id;
-
-      v_allocations := v_allocations || jsonb_build_object(
-        'invoice_id', v_invoice.id,
-        'invoice_number', v_invoice.invoice_number,
-        'billing_cycle', v_invoice.billing_cycle,
-        'amount_allocated', v_allocated_amount,
-        'new_remaining', v_new_remaining,
-        'status', v_new_status
-      );
-
-      v_remaining_to_distribute := ROUND(v_remaining_to_distribute - v_allocated_amount, 2);
-    END IF;
-  END LOOP;
-
-  -- 7. Handle Overpayment: Credit Ledger Deposit
-  IF v_remaining_to_distribute > 0 THEN
-    v_credit_amount := v_remaining_to_distribute;
-    
-    INSERT INTO public.customer_credits (
-      customer_id, payment_id, amount, remaining_amount, status, created_at
-    ) VALUES (
-      p_customer_id, v_payment_id, v_credit_amount, v_credit_amount, 'AVAILABLE', p_payment_date
-    );
-
-    UPDATE public.customers
-    SET balance = ROUND(balance + v_credit_amount, 2),
-        updated_at = CURRENT_TIMESTAMP
-    WHERE id = p_customer_id;
-  END IF;
-
-  -- 8. Recalculate Total Remaining Debt and Total Available Credit
-  SELECT COALESCE(SUM(remaining_amount), 0.00) INTO v_updated_debt 
-  FROM public.invoices
-  WHERE customer_id = p_customer_id AND status IN ('Unpaid', 'Partially_Paid') AND approval_status = 'APPROVED';
-
-  SELECT COALESCE(SUM(remaining_amount), 0.00) INTO v_total_credit_available
-  FROM public.customer_credits
-  WHERE customer_id = p_customer_id AND status = 'AVAILABLE';
-
-  UPDATE public.customers
-  SET total_due = v_updated_debt,
-      updated_at = CURRENT_TIMESTAMP
-  WHERE id = p_customer_id;
-
-  -- 9. Security Audit Logging
-  INSERT INTO public.audit_logs (
-    action, entity, entity_id, user_id, details, created_at
-  ) VALUES (
-    'PAYMENT_SUBMIT_FIFO', 'Payment', v_payment_id::TEXT, p_actor_user_id,
-    'تحصيل دفعة مالية بقيمة ' || p_amount_paid || ' ر.ي للمشترك: ' || v_customer.full_name || 
-    ' (سند رقم: ' || v_receipt_number || ')' ||
-    CASE WHEN v_credit_amount > 0 THEN ' [رصيد دائن فائض: ' || v_credit_amount || ' ر.ي]' ELSE '' END ||
-    ' المتبقي الكلي للمشترك: ' || v_updated_debt || ' ر.ي',
-    p_payment_date
-  );
-
-  RETURN json_build_object(
-    'success', true,
-    'is_duplicate', false,
-    'payment_id', v_payment_id,
-    'receipt_number', v_receipt_number,
-    'allocated_total', ROUND(p_amount_paid - v_credit_amount, 2),
-    'credit_balance', v_credit_amount,
-    'total_credit_available', v_total_credit_available,
-    'remaining_debt', v_updated_debt,
-    'allocations', v_allocations
-  );
+    RAISE EXCEPTION 'DEPRECATED: Financial transactions must be processed via Go backend engine (payment_service.go).' USING ERRCODE = 'feature_not_supported';
 END;
 $$;
 
@@ -1735,9 +910,7 @@ CREATE TABLE public.invoices (
     previous_reading numeric(12,2) DEFAULT 0.00 NOT NULL,
     current_reading numeric(12,2) DEFAULT 0.00 NOT NULL,
     consumption numeric(12,2) DEFAULT 0.00 NOT NULL,
-    lost_units numeric(12,2) DEFAULT 0.00 NOT NULL,
     consumption_value numeric(12,2) DEFAULT 0.00 NOT NULL,
-    lost_units_value numeric(12,2) DEFAULT 0.00 NOT NULL,
     kwh_price_snapshot numeric(12,2) NOT NULL,
     fixed_fee_snapshot numeric(12,2) DEFAULT 0.00 NOT NULL,
     arrears numeric(12,2) DEFAULT 0.00 NOT NULL,
@@ -1752,10 +925,10 @@ CREATE TABLE public.invoices (
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     CONSTRAINT chk_invoices_approval CHECK (((approval_status)::text = ANY (ARRAY[('APPROVED'::character varying)::text, ('PENDING'::character varying)::text, ('REJECTED'::character varying)::text]))),
-    CONSTRAINT chk_invoices_financials CHECK (((consumption_value >= (0)::numeric) AND (lost_units_value >= (0)::numeric) AND (kwh_price_snapshot >= (0)::numeric) AND (fixed_fee_snapshot >= (0)::numeric) AND (paid_amount >= (0)::numeric))),
+    CONSTRAINT chk_invoices_financials CHECK (((consumption_value >= (0)::numeric) AND (kwh_price_snapshot >= (0)::numeric) AND (fixed_fee_snapshot >= (0)::numeric) AND (paid_amount >= (0)::numeric))),
     CONSTRAINT chk_invoices_monotonic CHECK (((is_meter_reset = true) OR (current_reading = (0)::numeric) OR (current_reading >= previous_reading))),
     CONSTRAINT chk_invoices_number_pattern CHECK (((invoice_number)::text ~ '^INV-[A-Za-z0-9_ء-ي\-]+-[A-Za-z0-9_\-]+$'::text)),
-    CONSTRAINT chk_invoices_readings CHECK (((previous_reading >= (0)::numeric) AND (current_reading >= (0)::numeric) AND (consumption >= (0)::numeric) AND (lost_units >= (0)::numeric))),
+    CONSTRAINT chk_invoices_readings CHECK (((previous_reading >= (0)::numeric) AND (current_reading >= (0)::numeric) AND (consumption >= (0)::numeric))),
     CONSTRAINT chk_invoices_status CHECK (((status)::text = ANY (ARRAY[('Unpaid'::character varying)::text, ('Partially_Paid'::character varying)::text, ('Paid'::character varying)::text, ('Cancelled'::character varying)::text, ('Void'::character varying)::text, ('Pending_Approval'::character varying)::text])))
 );
 
@@ -1790,7 +963,6 @@ CREATE TABLE public.meter_readings (
     reading_value numeric(12,2) NOT NULL,
     previous_reading numeric(12,2) DEFAULT 0.00 NOT NULL,
     consumption numeric(12,2) DEFAULT 0.00 NOT NULL,
-    lost_units numeric(12,2) DEFAULT 0.00 NOT NULL,
     reading_date timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     collector_name character varying(100) NOT NULL,
     collector_user_id bigint,
@@ -1801,7 +973,7 @@ CREATE TABLE public.meter_readings (
     is_meter_reset boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    CONSTRAINT chk_meter_readings_amounts CHECK (((reading_value >= (0)::numeric) AND (previous_reading >= (0)::numeric) AND (consumption >= (0)::numeric) AND (lost_units >= (0)::numeric))),
+    CONSTRAINT chk_meter_readings_amounts CHECK (((reading_value >= (0)::numeric) AND (previous_reading >= (0)::numeric) AND (consumption >= (0)::numeric))),
     CONSTRAINT chk_meter_readings_approval CHECK (((approval_status)::text = ANY (ARRAY[('APPROVED'::character varying)::text, ('PENDING'::character varying)::text, ('REJECTED'::character varying)::text]))),
     CONSTRAINT chk_meter_readings_monotonic CHECK (((is_meter_reset = true) OR (reading_value = (0)::numeric) OR (reading_value >= previous_reading)))
 );
@@ -6031,7 +5203,7 @@ CREATE INDEX idx_whatsmeow_privacy_tokens_our_jid_timestamp ON public.whatsmeow_
 -- Name: uq_customers_subscriber_number_clean; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX uq_customers_subscriber_number_clean ON public.customers USING btree (REGEXP_REPLACE(TRIM(BOTH FROM lower(subscriber_number)), '^0+', '')) WHERE (is_deleted = false);
+CREATE UNIQUE INDEX uq_customers_subscriber_number_clean ON public.customers USING btree (COALESCE(NULLIF(REGEXP_REPLACE(TRIM(BOTH FROM lower(subscriber_number)), '^0+', ''), ''), '0')) WHERE (is_deleted = false);
 
 
 --

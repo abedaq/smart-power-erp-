@@ -34,7 +34,7 @@ var (
 
 var (
 	// DefaultAppVersion represents current release version of SmartPower ERP
-	DefaultAppVersion = "3.4.4.1"
+	DefaultAppVersion = "3.4.5.4"
 	// DefaultManifestURL fallback remote version metadata endpoint
 	DefaultManifestURL = "https://pkuoytiickgbtfeffmxq.supabase.co/storage/v1/object/public/updates/version.json"
 )
@@ -286,15 +286,15 @@ func (s *UpdateService) CheckForUpdates() (*CheckUpdateResponse, error) {
 }
 
 func getUpdatesDir() string {
-	progData := os.Getenv("ProgramData")
-	if progData == "" {
-		progData = "C:\\ProgramData"
+	localAppData := os.Getenv("LOCALAPPDATA")
+	if localAppData == "" {
+		localAppData = os.Getenv("APPDATA")
 	}
-	if _, err := os.Stat(progData); err != nil {
-		progData = os.TempDir()
+	if localAppData == "" {
+		localAppData = os.TempDir()
 	}
-	updatesDir := filepath.Join(progData, "SmartPowerERP_Updates")
-	_ = os.MkdirAll(updatesDir, 0755)
+	updatesDir := filepath.Join(localAppData, "SmartPowerERP", "updates")
+	_ = os.MkdirAll(updatesDir, 0700)
 	return updatesDir
 }
 
@@ -439,17 +439,23 @@ func (s *UpdateService) DownloadUpdate(ctx context.Context, downloadURL string, 
 	// Explicitly close file before computing final status and releasing file handle
 	_ = out.Close()
 
-	// Verify SHA256 integrity checksum if specified
-	if strings.TrimSpace(expectedSHA256) != "" {
-		calculatedHash := hex.EncodeToString(hasher.Sum(nil))
-		if !strings.EqualFold(calculatedHash, strings.TrimSpace(expectedSHA256)) {
-			_ = os.Remove(destPath)
-			err := fmt.Errorf("SHA256 integrity checksum mismatch! Expected: %s, Computed: %s", expectedSHA256, calculatedHash)
-			s.recordError(err.Error())
-			return "", err
-		}
-		log.Printf("🔒 SHA256 integrity verified successfully: %s", calculatedHash)
+	// Verify mandatory SHA256 integrity checksum
+	cleanExpectedSHA := strings.TrimSpace(expectedSHA256)
+	if len(cleanExpectedSHA) != 64 {
+		_ = os.Remove(destPath)
+		err := errors.New("رفض التحميل: قيمة SHA-256 الرقمية الإلزامية مفقودة أو غير صالحة في حزمة التحديث")
+		s.recordError(err.Error())
+		return "", err
 	}
+
+	calculatedHash := hex.EncodeToString(hasher.Sum(nil))
+	if !strings.EqualFold(calculatedHash, cleanExpectedSHA) {
+		_ = os.Remove(destPath)
+		err := fmt.Errorf("SHA256 integrity checksum mismatch! Expected: %s, Computed: %s", cleanExpectedSHA, calculatedHash)
+		s.recordError(err.Error())
+		return "", err
+	}
+	log.Printf("🔒 SHA256 integrity verified successfully: %s", calculatedHash)
 
 	s.mu.Lock()
 	s.progress.Status = "ready"
@@ -495,24 +501,39 @@ func (s *UpdateService) ApplyUpdate(downloadedFilePath string) error {
 		return fmt.Errorf("failed to resolve executable symlinks: %w", err)
 	}
 
-	// 2. Resolve downloaded binary path
-	if downloadedFilePath == "" {
-		s.mu.RLock()
-		downloadedFilePath = s.progress.DownloadedPath
-		s.mu.RUnlock()
-	}
+	// 2. Resolve and sanitize downloaded binary path strictly within secure updates directory
+	trustedUpdatesDir := filepath.Clean(getUpdatesDir())
+	resolvedPath := ""
 
-	if downloadedFilePath == "" {
+	s.mu.RLock()
+	if s.progress.DownloadedPath != "" && s.progress.Status == "ready" {
+		resolvedPath = s.progress.DownloadedPath
+	}
+	s.mu.RUnlock()
+
+	if resolvedPath == "" {
 		// Check default updates location
-		tempDefault := filepath.Join(getUpdatesDir(), "SmartPowerERP_new.exe")
+		tempDefault := filepath.Join(trustedUpdatesDir, "SmartPowerERP_new.exe")
 		if fi, err := os.Stat(tempDefault); err == nil && fi.Size() > 0 {
-			downloadedFilePath = tempDefault
+			resolvedPath = tempDefault
 		}
 	}
 
-	if downloadedFilePath == "" {
-		return errors.New("no downloaded update binary is ready to apply. Please download the update first.")
+	// If a specific path was passed, verify it is strictly located inside trustedUpdatesDir
+	if downloadedFilePath != "" {
+		cleanInput := filepath.Clean(downloadedFilePath)
+		rel, err := filepath.Rel(trustedUpdatesDir, cleanInput)
+		if err == nil && !strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel) {
+			resolvedPath = cleanInput
+		} else {
+			log.Printf("⚠️ Untrusted update binary path rejected: %s", downloadedFilePath)
+		}
 	}
+
+	if resolvedPath == "" {
+		return errors.New("no validated update binary is ready to apply. Please download the update first.")
+	}
+	downloadedFilePath = resolvedPath
 
 	fi, err := os.Stat(downloadedFilePath)
 	if err != nil || fi.Size() == 0 {

@@ -116,7 +116,6 @@ export const ExcelGrid: React.FC<ExcelGridProps> = ({
           serviceFee: dirtyCells.has(`${initRow.id}:serviceFee`) ? local.serviceFee : initRow.serviceFee,
           arrears: dirtyCells.has(`${initRow.id}:arrears`) ? local.arrears : initRow.arrears,
           paidAmount: dirtyCells.has(`${initRow.id}:paidAmount`) ? local.paidAmount : initRow.paidAmount,
-          lostUnits: dirtyCells.has(`${initRow.id}:lostUnits`) ? local.lostUnits : initRow.lostUnits,
         };
       });
     });

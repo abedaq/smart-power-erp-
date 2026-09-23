@@ -24,6 +24,7 @@ export interface Customer {
   address?: string;
   meter_number?: string;
   route_number?: string;
+  sort_order?: number;
   subscription_plan_id?: number;
   subscription_plan?: SubscriptionPlan;
   initial_reading: number;
@@ -48,7 +49,6 @@ export interface Invoice {
   customer?: Customer;
   reading_id?: number | null;
   meter_reading?: any;
-  lost_units?: number;
   previous_reading: number;
   current_reading: number;
   consumption: number;
@@ -76,7 +76,7 @@ export interface Payment {
   amount_paid: number;
   payment_date: string;
   accountant_name: string;
-  approval_status?: 'PENDING' | 'PENDING_REVIEW' | 'APPROVED' | 'REJECTED';
+  approval_status?: 'PENDING' | 'PENDING_REVIEW' | 'APPROVED' | 'REJECTED' | 'REVERSED';
   rejection_reason?: string;
   notes?: string;
 }

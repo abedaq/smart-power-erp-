@@ -87,7 +87,6 @@ const mockRow = computeRowFinancials({
   phone: '771234567',
   prevReading: 1200,
   currReading: 1350,
-  lostUnits: 15,
   unitPrice: 1400,
   serviceFee: 1000,
   arrears: 5000,
@@ -138,7 +137,6 @@ const stressRow = computeRowFinancials({
   phone: '00967-78-999-8888',
   prevReading: 0,
   currReading: 1000000,
-  lostUnits: 50000,
   unitPrice: 2500,
   serviceFee: 10000,
   arrears: 15000000,
@@ -191,7 +189,6 @@ const easternRow = computeRowFinancials({
   phone: '\u0660\u0667\u0667\u0661\u0662\u0663\u0664\u0665\u0666\u0667', // ٠٧٧١٢٣٤٥٦٧
   prevReading: '\u0661\u0660\u0660\u0660', // ١٠٠٠ -> 1000
   currReading: '\u0661\u0662\u0665\u0660', // ١٢٥٠ -> 1250
-  lostUnits: '\u0661\u0660', // ١٠ -> 10
   unitPrice: '\u0661\u0664\u0660\u0660', // ١٤٠٠ -> 1400
   serviceFee: '\u0661\u0660\u0660\u0660', // ١٠٠٠ -> 1000
   arrears: '\u0665\u0660\u0660\u0660', // ٥٠٠٠ -> 5000
@@ -200,7 +197,6 @@ const easternRow = computeRowFinancials({
 
 assert(easternRow.units === 250, 'Eastern digits parsed in computeRowFinancials: units = 250 (1250 - 1000)');
 assert(easternRow.consumptionCost === 350000, 'Eastern digits consumptionCost = 350,000 (250 * 1400)');
-assert(easternRow.lostUnitsCost === 14000, 'Eastern digits lostUnitsCost = 14,000 (10 * 1400)');
 assert(easternRow.totalDue === 356000, 'Eastern digits totalDue = 356,000 (350k + 1k + 5k)');
 assert(easternRow.remaining === 156000, 'Eastern digits remaining = 156,000 (356k - 200k)');
 

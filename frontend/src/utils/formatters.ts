@@ -190,6 +190,17 @@ export function parseFormattedNumber(val: unknown): number {
 }
 
 /**
+ * Parses Eastern Arabic (٠-٩), Persian (۰-۹), or Western English formatted number string to a standard float number.
+ * Handles negative numbers, decimal points, and Arabic/English comma separators.
+ */
+export function parseArabicNumber(val: string | number | null | undefined): number {
+  if (val === null || val === undefined || val === '') return 0;
+  const sanitized = sanitizeDecimalInput(val);
+  const num = parseFloat(sanitized);
+  return Number.isNaN(num) ? 0 : num;
+}
+
+/**
  * Universal UUID v4 generator with RFC4122 fallback for insecure HTTP contexts (e.g. mobile LAN IP).
  */
 export function generateUUID(): string {

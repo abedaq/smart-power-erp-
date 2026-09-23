@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { getInvoices, sendInvoiceWhatsApp, sendDisconnectionWarning } from '../services/invoice.service';
-import { getPayments, sendReceiptWhatsAppApi } from '../services/payment.service';
+import { getPayments, sendReceiptWhatsAppApi, reversePaymentApi } from '../services/payment.service';
 import { getUniqueRoutes } from '../services/customer.service';
 import { getSettings } from '../services/settings.service';
 import api, { exportBillingCycle } from '../lib/api';
@@ -37,6 +37,8 @@ import {
   ChevronRight,
   ChevronLeft,
   UserPlus,
+  Undo2,
+  X,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import type { Invoice, Payment, Customer } from '../types';
@@ -180,6 +182,10 @@ const Invoices: React.FC = () => {
   const [showPaymentReceiptModal, setShowPaymentReceiptModal] = useState(false);
   const [selectedPaymentForReceipt, setSelectedPaymentForReceipt] = useState<Payment | null>(null);
 
+  const [showReversePaymentModal, setShowReversePaymentModal] = useState(false);
+  const [selectedPaymentForReverse, setSelectedPaymentForReverse] = useState<Payment | null>(null);
+  const [reverseReason, setReverseReason] = useState('');
+
   const [showStatementModal, setShowStatementModal] = useState(false);
   const [showReadingModal, setShowReadingModal] = useState(false);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
@@ -291,7 +297,13 @@ const Invoices: React.FC = () => {
 
   // Map Invoices to GridRowData
   const invoiceGridRows: GridRowData[] = useMemo(() => {
-    return filteredInvoices.map((inv: Invoice) => {
+    const sorted = [...filteredInvoices].sort((a, b) => {
+      const orderA = a.customer?.sort_order ?? 999999;
+      const orderB = b.customer?.sort_order ?? 999999;
+      if (orderA !== orderB) return orderA - orderB;
+      return (a.customer?.id || 0) - (b.customer?.id || 0);
+    });
+    return sorted.map((inv: Invoice) => {
       const planPrice = Number(
         inv.kwh_price_snapshot || inv.customer?.subscription_plan?.kwh_price || 1400
       );
@@ -313,7 +325,6 @@ const Invoices: React.FC = () => {
         phone: inv.customer?.phone_number || '',
         prevReading,
         currReading,
-        lostUnits: (inv as any).lost_units || 0,
         unitPrice: planPrice,
         serviceFee: planFee,
         arrears,
@@ -379,6 +390,24 @@ const Invoices: React.FC = () => {
     },
   });
 
+  const reversePaymentMutation = useMutation({
+    mutationFn: ({ paymentId, reason }: { paymentId: number; reason: string }) =>
+      reversePaymentApi(paymentId, reason),
+    onSuccess: () => {
+      toast.success('تم إلغاء وعكس سند القبض وإعادة ضبط الحساب بنجاح!');
+      setShowReversePaymentModal(false);
+      setSelectedPaymentForReverse(null);
+      setReverseReason('');
+      queryClient.invalidateQueries({ queryKey: ['payments'] });
+      queryClient.invalidateQueries({ queryKey: ['invoices'] });
+      queryClient.invalidateQueries({ queryKey: ['customers'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] });
+    },
+    onError: (error: any) => {
+      toast.error(`فشل إلغاء السند: ${error.response?.data?.message || error.message}`);
+    },
+  });
+
   const handleResetFilters = () => {
     setSearchQuery('');
     setSelectedRoute('all');
@@ -407,7 +436,6 @@ const Invoices: React.FC = () => {
       else if (field === 'serviceFee') cellPayload.service_fee = Number(value || 0);
       else if (field === 'arrears') cellPayload.arrears = Number(value || 0);
       else if (field === 'paidAmount') cellPayload.paid_amount = Number(value || 0);
-      else if (field === 'lostUnits') cellPayload.lost_units = Number(value || 0);
       else if (field === 'subNumber') cellPayload.subscriber_number = String(value).trim();
       else if (field === 'name') cellPayload.full_name = String(value).trim();
       else if (field === 'address') cellPayload.address = String(value).trim();
@@ -701,66 +729,96 @@ const Invoices: React.FC = () => {
                       </td>
                     </tr>
                   ) : (
-                    filteredPayments.map((payment: Payment) => (
-                      <tr key={payment.id} className="hover:bg-slate-50/80 transition-colors">
-                        <td className="px-5 py-3.5 font-mono text-xs font-bold text-emerald-700">
-                          {payment.receipt_number || `REC-#${payment.id}`}
-                        </td>
-                        <td className="px-5 py-3.5 text-slate-600 text-xs font-mono">
-                          {payment.payment_date
-                            ? new Date(payment.payment_date).toLocaleString('en-US')
-                            : '-'}
-                        </td>
-                        <td className="px-5 py-3.5">
-                          <div className="font-bold text-slate-900 text-sm">
-                            {payment.customer?.full_name}
-                          </div>
-                          <div className="text-[11px] text-blue-600 font-mono font-bold">
-                            #{payment.customer?.subscriber_number}
-                          </div>
-                        </td>
-                        <td className="px-5 py-3.5 text-slate-700 text-xs font-medium">
-                          <span className="bg-slate-100 px-2 py-0.5 rounded text-[11px] font-bold border border-slate-200">
-                            {getNormalizedArea(payment.customer?.address)}
-                          </span>
-                        </td>
-                        <td className="px-5 py-3.5 font-bold font-mono text-emerald-700 text-sm">
-                          {Number(payment.amount_paid).toLocaleString('en-US')} ر.ي
-                        </td>
-                        <td className="px-5 py-3.5">
-                          <span className="bg-slate-100 px-2.5 py-1 rounded-lg text-xs font-semibold text-slate-700 border border-slate-200">
-                            {payment.payment_method === 'CASH' ? '💵 نقداً' : '🏦 تحويل'}
-                          </span>
-                        </td>
-                        <td className="px-5 py-3.5 text-slate-700 text-xs font-medium">
-                          {payment.accountant_name || 'أمين الصندوق'}
-                        </td>
-                        <td className="px-5 py-3.5">
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={() => {
-                                setSelectedPaymentForReceipt(payment);
-                                setShowPaymentReceiptModal(true);
-                              }}
-                              className="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 text-xs px-2.5 py-1.5 rounded-xl font-bold transition-all inline-flex items-center gap-1"
-                              title="طباعة سند القبض المالي"
-                            >
-                              <Printer size={13} />
-                              طباعة
-                            </button>
-                            <button
-                              onClick={() => sendReceiptWhatsAppMutation.mutate(payment.id)}
-                              disabled={sendReceiptWhatsAppMutation.isPending}
-                              className="bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-600 hover:text-white text-xs px-2.5 py-1.5 rounded-xl font-bold transition-all inline-flex items-center gap-1 disabled:opacity-50"
-                              title="إعادة إرسال السند عبر الواتساب"
-                            >
-                              <Smartphone size={13} />
-                              واتساب
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))
+                    filteredPayments.map((payment: Payment) => {
+                      const isReversed = payment.approval_status === 'REVERSED';
+                      return (
+                        <tr key={payment.id} className={`hover:bg-slate-50/80 transition-colors ${isReversed ? 'bg-rose-50/30' : ''}`}>
+                          <td className="px-5 py-3.5 font-mono text-xs font-bold text-emerald-700">
+                            <div className="flex items-center gap-1.5">
+                              <span>{payment.receipt_number || `REC-#${payment.id}`}</span>
+                              {isReversed && (
+                                <span className="bg-rose-100 text-rose-700 border border-rose-200 text-[10px] px-1.5 py-0.5 rounded font-bold font-sans">
+                                  ملغي
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-5 py-3.5 text-slate-600 text-xs font-mono">
+                            {payment.payment_date
+                              ? new Date(payment.payment_date).toLocaleString('en-US')
+                              : '-'}
+                          </td>
+                          <td className="px-5 py-3.5">
+                            <div className="font-bold text-slate-900 text-sm">
+                              {payment.customer?.full_name}
+                            </div>
+                            <div className="text-[11px] text-blue-600 font-mono font-bold">
+                              #{payment.customer?.subscriber_number}
+                            </div>
+                          </td>
+                          <td className="px-5 py-3.5 text-slate-700 text-xs font-medium">
+                            <span className="bg-slate-100 px-2 py-0.5 rounded text-[11px] font-bold border border-slate-200">
+                              {getNormalizedArea(payment.customer?.address)}
+                            </span>
+                          </td>
+                          <td className="px-5 py-3.5 font-bold font-mono text-sm">
+                            <span className={isReversed ? 'line-through text-slate-400' : 'text-emerald-700'}>
+                              {Number(payment.amount_paid).toLocaleString('en-US')} ر.ي
+                            </span>
+                          </td>
+                          <td className="px-5 py-3.5">
+                            <span className="bg-slate-100 px-2.5 py-1 rounded-lg text-xs font-semibold text-slate-700 border border-slate-200">
+                              {payment.payment_method === 'CASH' ? '💵 نقداً' : '🏦 تحويل'}
+                            </span>
+                          </td>
+                          <td className="px-5 py-3.5 text-slate-700 text-xs font-medium">
+                            {payment.accountant_name || 'أمين الصندوق'}
+                          </td>
+                          <td className="px-5 py-3.5">
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                onClick={() => {
+                                  setSelectedPaymentForReceipt(payment);
+                                  setShowPaymentReceiptModal(true);
+                                }}
+                                className="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 text-xs px-2.5 py-1.5 rounded-xl font-bold transition-all inline-flex items-center gap-1 cursor-pointer"
+                                title="طباعة سند القبض المالي"
+                              >
+                                <Printer size={13} />
+                                طباعة
+                              </button>
+                              <button
+                                onClick={() => sendReceiptWhatsAppMutation.mutate(payment.id)}
+                                disabled={sendReceiptWhatsAppMutation.isPending || isReversed}
+                                className="bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-600 hover:text-white text-xs px-2.5 py-1.5 rounded-xl font-bold transition-all inline-flex items-center gap-1 disabled:opacity-50 cursor-pointer"
+                                title="إعادة إرسال السند عبر الواتساب"
+                              >
+                                <Smartphone size={13} />
+                                واتساب
+                              </button>
+                              {!isReversed ? (
+                                <button
+                                  onClick={() => {
+                                    setSelectedPaymentForReverse(payment);
+                                    setReverseReason('سداد بالخطأ');
+                                    setShowReversePaymentModal(true);
+                                  }}
+                                  className="bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-600 hover:text-white text-xs px-2.5 py-1.5 rounded-xl font-bold transition-all inline-flex items-center gap-1 cursor-pointer shadow-2xs"
+                                  title="إلغاء سند القبض وعكس العملية"
+                                >
+                                  <Undo2 size={13} />
+                                  إلغاء
+                                </button>
+                              ) : (
+                                <span className="text-[11px] text-slate-400 italic px-2">
+                                  تم العكس
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>
@@ -933,6 +991,113 @@ const Invoices: React.FC = () => {
         onClose={() => setShowPaymentReceiptModal(false)}
         payment={selectedPaymentForReceipt}
       />
+
+      {/* Modal: Confirm Reverse Payment */}
+      {showReversePaymentModal && selectedPaymentForReverse && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in">
+          <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl border border-slate-100 overflow-hidden flex flex-col animate-scale-up">
+            {/* Header */}
+            <div className="px-5 py-4 bg-rose-600 text-white flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-white/20 rounded-xl">
+                  <Undo2 size={18} />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm">تأكيد إلغاء وعكس سند القبض</h3>
+                  <p className="text-[11px] text-rose-100">إرجاع المبالغ لذمة المشترك وإعادة الفواتير غير مسددة</p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setShowReversePaymentModal(false);
+                  setSelectedPaymentForReverse(null);
+                }}
+                className="p-1 text-white/80 hover:text-white rounded-lg hover:bg-white/10 transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="p-5 space-y-4 text-xs">
+              <div className="bg-rose-50 border border-rose-200 rounded-xl p-3.5 space-y-2 text-rose-900">
+                <div className="flex justify-between items-center border-b border-rose-200/60 pb-2">
+                  <span className="text-slate-600 font-medium">رقم السند:</span>
+                  <span className="font-mono font-bold text-rose-700 text-sm">
+                    {selectedPaymentForReverse.receipt_number || `REC-#${selectedPaymentForReverse.id}`}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center border-b border-rose-200/60 pb-2">
+                  <span className="text-slate-600 font-medium">المشترك:</span>
+                  <span className="font-bold text-slate-900 text-sm">
+                    {selectedPaymentForReverse.customer?.full_name}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center border-b border-rose-200/60 pb-2">
+                  <span className="text-slate-600 font-medium">المبلغ المسدد المُراد إلغاؤه:</span>
+                  <span className="font-mono font-black text-rose-700 text-base">
+                    {Number(selectedPaymentForReverse.amount_paid).toLocaleString('en-US')} ر.ي
+                  </span>
+                </div>
+                <div className="flex justify-between items-center text-[11px]">
+                  <span className="text-slate-500">المحصل:</span>
+                  <span className="text-slate-700 font-medium">
+                    {selectedPaymentForReverse.accountant_name || 'أمين الصندوق'}
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold mb-1.5">سبب الإلغاء (اختياري):</label>
+                <input
+                  type="text"
+                  value={reverseReason}
+                  onChange={(e) => setReverseReason(e.target.value)}
+                  placeholder="مثال: سداد بالخطأ، تعديل حساب المشترك..."
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 focus:outline-none focus:border-rose-500 font-medium"
+                />
+              </div>
+
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-[11px] text-amber-800 flex items-start gap-2">
+                <AlertTriangle size={16} className="text-amber-600 shrink-0 mt-0.5" />
+                <span>
+                  تنبيه: سيتم عكس أثر هذا السند مالياً فورياً، وخصم المبلغ من صندوق الوردية المفتوحة وإرجاع حالة الفواتير غير مسددة.
+                </span>
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="px-5 py-3.5 bg-slate-50 border-t border-slate-100 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowReversePaymentModal(false);
+                  setSelectedPaymentForReverse(null);
+                }}
+                disabled={reversePaymentMutation.isPending}
+                className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-200 rounded-xl transition-colors cursor-pointer"
+              >
+                تراجع
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedPaymentForReverse) {
+                    reversePaymentMutation.mutate({
+                      paymentId: selectedPaymentForReverse.id,
+                      reason: reverseReason,
+                    });
+                  }
+                }}
+                disabled={reversePaymentMutation.isPending}
+                className="px-5 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-xl shadow-md hover:shadow-lg transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                {reversePaymentMutation.isPending ? 'جاري الإلغاء...' : 'تأكيد الإلغاء وعكس العملية'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <StatementModal
         isOpen={showStatementModal}

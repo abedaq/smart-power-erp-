@@ -78,13 +78,6 @@ func (s *ExcelService) ImportReadingsExcel(reader io.Reader, cycleName, collecto
 			continue
 		}
 
-		var lostUnits float64 = 0
-		if len(row) > 3 {
-			if lu, err := strconv.ParseFloat(strings.TrimSpace(row[3]), 64); err == nil {
-				lostUnits = lu
-			}
-		}
-
 		var customer models.Customer
 		if err := s.db.Where("subscriber_number = ? OR CAST(id AS TEXT) = ?", subNum, subNum).First(&customer).Error; err != nil {
 			result.FailedRows++
@@ -105,7 +98,6 @@ func (s *ExcelService) ImportReadingsExcel(reader io.Reader, cycleName, collecto
 		_, err = s.readingService.CreateReading(CreateReadingRequest{
 			CustomerID:      customer.ID,
 			ReadingValue:    readingVal,
-			LostUnits:       lostUnits,
 			CollectorName:   colName,
 			ApprovalStatus:  "APPROVED",
 			BillingCycle:    canonicalCycle,
@@ -224,10 +216,33 @@ func (s *ExcelService) ExportCycleExcel(cycleName string) ([]byte, error) {
 		},
 	})
 
+	blankIfZero := func(v float64) interface{} {
+		if v == 0 {
+			return ""
+		}
+		return v
+	}
+
 	headers := []string{
-		"رقم الفاتورة", "رقم الحساب", "اسم المشترك", "رقم الهاتف", "المسار",
-		"القراءة السابقة", "القراءة الحالية", "الاستهلاك (ك.و)", "سعر الكيلو",
-		"قيمة الاستهلاك", "رسوم ثابتة", "إجمالي الفاتورة", "المتأخرات", "المبلغ المطلوب", "المسدد", "المتبقي", "الحالة",
+		"رقم الفاتورة",
+		"رقم المشترك",
+		"خط السير",
+		"اسم المشترك",
+		"العنوان",
+		"رقم العداد",
+		"رقم الهاتف",
+		"القراءة السابقة",
+		"القراءة الحالية",
+		"الاستهلاك (ك.و)",
+		"سعر الكيلو",
+		"قيمة الاستهلاك",
+		"رسوم الخدمة",
+		"إجمالي الفاتورة",
+		"المتأخرات",
+		"إجمالي المستحق",
+		"المسدد",
+		"المتبقي",
+		"الدورة الفوترية",
 	}
 
 	_ = f.SetRowHeight(sheet, 1, 28)
@@ -255,12 +270,20 @@ func (s *ExcelService) ExportCycleExcel(cycleName string) ([]byte, error) {
 		subNo := ""
 		phone := ""
 		route := ""
+		address := ""
+		meterNum := ""
 		if inv.Customer != nil {
-			custName = inv.Customer.FullName
-			subNo = inv.Customer.SubscriberNumber
-			phone = inv.Customer.PhoneNumber
+			custName = strings.TrimSpace(inv.Customer.FullName)
+			subNo = strings.TrimSpace(inv.Customer.SubscriberNumber)
+			phone = strings.TrimSpace(inv.Customer.PhoneNumber)
 			if inv.Customer.RouteNumber != nil {
-				route = *inv.Customer.RouteNumber
+				route = strings.TrimSpace(*inv.Customer.RouteNumber)
+			}
+			if inv.Customer.Address != nil {
+				address = strings.TrimSpace(*inv.Customer.Address)
+			}
+			if inv.Customer.MeterNumber != nil {
+				meterNum = strings.TrimSpace(*inv.Customer.MeterNumber)
 			}
 		}
 
@@ -278,17 +301,41 @@ func (s *ExcelService) ExportCycleExcel(cycleName string) ([]byte, error) {
 		sumPaid += inv.PaidAmount
 		sumRemaining += inv.RemainingAmount
 
-		statusLabel := "غير مسدد"
-		if inv.Status == "Paid" || inv.RemainingAmount <= 0 {
-			statusLabel = "مسدد بالكامل"
-		} else if inv.Status == "Partially_Paid" || inv.PaidAmount > 0 {
-			statusLabel = "مسدد جزئياً"
+		cycleVal := ""
+		if inv.BillingCycle != nil {
+			cycleVal = strings.TrimSpace(*inv.BillingCycle)
+		}
+		if cycleVal == "" {
+			cycleVal = cleanCycle
+		}
+		if cycleVal == "" || strings.EqualFold(cycleVal, "all") || cycleVal == "كافة الدورات" {
+			cycleVal = "أغسطس 2"
+		}
+		canonicalCycle := FormatCanonicalCycle(cycleVal)
+		if canonicalCycle == "" {
+			canonicalCycle = cycleVal
 		}
 
 		values := []interface{}{
-			invNum, subNo, custName, phone, route,
-			inv.PreviousReading, inv.CurrentReading, inv.Consumption, inv.KwhPriceSnapshot,
-			inv.ConsumptionValue, inv.FixedFeeSnapshot, inv.TotalAmount, inv.Arrears, inv.TotalDue, inv.PaidAmount, inv.RemainingAmount, statusLabel,
+			invNum,
+			subNo,
+			route,
+			custName,
+			address,
+			meterNum,
+			phone,
+			blankIfZero(inv.PreviousReading),
+			blankIfZero(inv.CurrentReading),
+			blankIfZero(inv.Consumption),
+			blankIfZero(inv.KwhPriceSnapshot),
+			blankIfZero(inv.ConsumptionValue),
+			blankIfZero(inv.FixedFeeSnapshot),
+			blankIfZero(inv.TotalAmount),
+			blankIfZero(inv.Arrears),
+			blankIfZero(inv.TotalDue),
+			blankIfZero(inv.PaidAmount),
+			blankIfZero(inv.RemainingAmount),
+			canonicalCycle,
 		}
 
 		for colIdx, val := range values {
@@ -304,14 +351,14 @@ func (s *ExcelService) ExportCycleExcel(cycleName string) ([]byte, error) {
 
 	summaryValues := map[int]interface{}{
 		1:  "الإجمالي العام",
-		8:  sumConsumption,
-		10: sumConsumptionVal,
-		11: sumFixedFee,
-		12: sumTotalAmount,
-		13: sumArrears,
-		14: sumTotalDue,
-		15: sumPaid,
-		16: sumRemaining,
+		10: blankIfZero(sumConsumption),
+		12: blankIfZero(sumConsumptionVal),
+		13: blankIfZero(sumFixedFee),
+		14: blankIfZero(sumTotalAmount),
+		15: blankIfZero(sumArrears),
+		16: blankIfZero(sumTotalDue),
+		17: blankIfZero(sumPaid),
+		18: blankIfZero(sumRemaining),
 	}
 
 	for colIdx := 1; colIdx <= len(headers); colIdx++ {
@@ -325,28 +372,33 @@ func (s *ExcelService) ExportCycleExcel(cycleName string) ([]byte, error) {
 	}
 
 	// Set optimal column widths
-	colWidths := map[string]float64{
-		"A": 16, // رقم الفاتورة
-		"B": 15, // رقم الحساب
-		"C": 28, // اسم المشترك
-		"D": 16, // رقم الهاتف
-		"E": 18, // المسار
-		"F": 14, // القراءة السابقة
-		"G": 14, // القراءة الحالية
-		"H": 16, // الاستهلاك
-		"I": 12, // سعر الكيلو
-		"J": 16, // قيمة الاستهلاك
-		"K": 14, // رسوم ثابتة
-		"L": 16, // إجمالي الفاتورة
-		"M": 14, // المتأخرات
-		"N": 16, // المبلغ المطلوب
-		"O": 14, // المسدد
-		"P": 14, // المتبقي
-		"Q": 16, // الحالة
+	colWidths := []float64{
+		16, // 1: رقم الفاتورة
+		14, // 2: رقم المشترك
+		12, // 3: خط السير
+		28, // 4: اسم المشترك
+		20, // 5: العنوان
+		16, // 6: رقم العداد
+		16, // 7: رقم الهاتف
+		14, // 8: القراءة السابقة
+		14, // 9: القراءة الحالية
+		15, // 10: الاستهلاك (ك.و)
+		12, // 11: سعر الكيلو
+		15, // 12: قيمة الاستهلاك
+		14, // 13: رسوم الخدمة
+		15, // 14: إجمالي الفاتورة
+		14, // 15: المتأخرات
+		16, // 16: إجمالي المستحق
+		14, // 17: المسدد
+		14, // 18: المتبقي
+		16, // 19: الدورة الفوترية
 	}
 
-	for col, width := range colWidths {
-		_ = f.SetColWidth(sheet, col, col, width)
+	for idx, width := range colWidths {
+		colName, err := excelize.ColumnNumberToName(idx + 1)
+		if err == nil {
+			_ = f.SetColWidth(sheet, colName, colName, width)
+		}
 	}
 
 	var buf bytes.Buffer

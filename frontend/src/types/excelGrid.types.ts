@@ -10,7 +10,6 @@ export interface GridRowData {
   phone: string;
   prevReading: number | string;
   currReading: number | string;
-  lostUnits?: number | string;
   unitPrice: number | string;
   serviceFee: number | string;
   arrears: number | string;
@@ -26,7 +25,6 @@ export interface GridRowData {
 
 export interface ComputedGridRow extends GridRowData {
   units: number;
-  lostUnitsCost: number;
   consumptionCost: number;
   totalDue: number;
   remaining: number;
@@ -35,7 +33,6 @@ export interface ComputedGridRow extends GridRowData {
 export interface GridFooterTotals {
   visibleCount: number;
   totalUnitsSum: number;
-  totalLostUnitsSum: number;
   totalArrearsSum: number;
   totalConsumptionCostSum: number;
   totalDueSum: number;
@@ -47,8 +44,7 @@ export interface GridFooterTotals {
  * Pure calculation of financial values for a single row.
  * Units = Math.max(0, currReading - prevReading)
  * Consumption Cost = Units * Unit Price
- * Lost Units Cost = Lost Units * Unit Price
- * Total Due = Consumption Cost + Lost Units Cost + Service Fee + Arrears
+ * Total Due = Consumption Cost + Service Fee + Arrears
  * Remaining = Total Due - Paid Amount
  */
 export function computeRowFinancials(row: GridRowData): ComputedGridRow {
@@ -66,22 +62,19 @@ export function computeRowFinancials(row: GridRowData): ComputedGridRow {
   const prev = parseNum(row.prevReading);
   const curr = parseNum(row.currReading);
   const units = Math.max(0, curr - prev);
-  const lostUnits = parseNum(row.lostUnits);
   const unitPrice = parseNum(row.unitPrice);
 
   const consumptionCost = units * unitPrice;
-  const lostUnitsCost = lostUnits * unitPrice;
   const serviceFee = parseNum(row.serviceFee);
   const arrears = parseNum(row.arrears);
 
-  const totalDue = consumptionCost + lostUnitsCost + serviceFee + arrears;
+  const totalDue = consumptionCost + serviceFee + arrears;
   const paid = parseNum(row.paidAmount);
   const remaining = totalDue - paid;
 
   return {
     ...row,
     units,
-    lostUnitsCost,
     consumptionCost,
     totalDue,
     remaining,
@@ -107,7 +100,6 @@ export function computeGridTotals(rows: ComputedGridRow[]): GridFooterTotals {
     (acc, row) => ({
       visibleCount: acc.visibleCount + 1,
       totalUnitsSum: acc.totalUnitsSum + parseNum(row.units),
-      totalLostUnitsSum: acc.totalLostUnitsSum + parseNum(row.lostUnits),
       totalArrearsSum: acc.totalArrearsSum + parseNum(row.arrears),
       totalConsumptionCostSum: acc.totalConsumptionCostSum + parseNum(row.consumptionCost),
       totalDueSum: acc.totalDueSum + parseNum(row.totalDue),
@@ -117,7 +109,6 @@ export function computeGridTotals(rows: ComputedGridRow[]): GridFooterTotals {
     {
       visibleCount: 0,
       totalUnitsSum: 0,
-      totalLostUnitsSum: 0,
       totalArrearsSum: 0,
       totalConsumptionCostSum: 0,
       totalDueSum: 0,

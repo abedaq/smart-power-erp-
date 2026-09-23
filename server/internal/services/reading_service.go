@@ -29,7 +29,6 @@ func NewReadingService() *ReadingService {
 type CreateReadingRequest struct {
 	CustomerID       int64   `json:"customer_id"`
 	ReadingValue     float64 `json:"reading_value"`
-	LostUnits        float64 `json:"lost_units"`
 	CollectorName    string  `json:"collector_name"`
 	CollectorUserID  *int64  `json:"collector_user_id"`
 	IPAddress        string  `json:"ip_address"`
@@ -101,17 +100,81 @@ func (s *ReadingService) CreateReading(req CreateReadingRequest) (*ReadingResult
 		consumptionValue := consumption * kwhPrice
 		totalAmount := consumptionValue + fixedFee
 
-		// 6. Calculate Arrears from previous unpaid invoices
-		var arrearsSummary struct {
-			TotalRemaining float64
-		}
-		tx.Model(&models.Invoice{}).
-			Select("COALESCE(SUM(remaining_amount), 0) as total_remaining").
-			Where("customer_id = ? AND status IN ('Unpaid', 'Partially_Paid')", customer.ID).
-			Scan(&arrearsSummary)
+		now := time.Now().UTC()
 
-		arrears := arrearsSummary.TotalRemaining
-		totalDue := totalAmount + arrears
+		// 6. Resolve Canonical Cycle and look up existing invoice for this cycle first
+		cycle := FormatCanonicalCycle(req.BillingCycle)
+		if cycle == "" {
+			cycle = FormatCanonicalCycle(now.Format("2006-01-2"))
+		}
+		aliases := getCycleAliases(cycle)
+
+		var existingInv models.Invoice
+		_ = tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("customer_id = ? AND (billing_cycle = ? OR billing_cycle IN ?)", customer.ID, cycle, aliases).
+			First(&existingInv)
+
+		// 7. Calculate Arrears strictly from the immediately preceding invoice (preventing duplicate debt compounding)
+		var priorInvoices []models.Invoice
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("customer_id = ? AND billing_cycle != ? AND billing_cycle NOT IN ?", customer.ID, cycle, aliases).
+			Order("id ASC").
+			Find(&priorInvoices).Error; err != nil {
+			return fmt.Errorf("failed to calculate arrears: %w", err)
+		}
+
+		targetCycleIdx := GetCycleSortIndex(cycle)
+		// Chronological Sequence Lock: reject inserting or modifying readings for a past cycle when a newer cycle already exists
+		if targetCycleIdx > 0 {
+			for i := range priorInvoices {
+				inv := &priorInvoices[i]
+				if inv.BillingCycle != nil && inv.ApprovalStatus != "REJECTED" {
+					idx := GetCycleSortIndex(*inv.BillingCycle)
+					if idx > targetCycleIdx {
+						return fmt.Errorf("chronological sequence violation: cannot insert or modify reading for past cycle '%s' when newer cycle '%s' already exists", cycle, *inv.BillingCycle)
+					}
+				}
+			}
+		}
+
+		var prevInvoice *models.Invoice
+		maxPrevIdx := -1
+		for i := range priorInvoices {
+			inv := &priorInvoices[i]
+			if existingInv.ID > 0 && inv.ID == existingInv.ID {
+				continue
+			}
+			if inv.BillingCycle == nil {
+				continue
+			}
+			idx := GetCycleSortIndex(*inv.BillingCycle)
+			if targetCycleIdx > 0 && idx > 0 {
+				if idx < targetCycleIdx && idx > maxPrevIdx {
+					maxPrevIdx = idx
+					prevInvoice = inv
+				}
+			} else if prevInvoice == nil || inv.ID > prevInvoice.ID {
+				prevInvoice = inv
+			}
+		}
+
+		// Fallback: If cycle indexing didn't resolve, take the highest ID prior invoice
+		if prevInvoice == nil && len(priorInvoices) > 0 {
+			for i := len(priorInvoices) - 1; i >= 0; i-- {
+				if existingInv.ID == 0 || priorInvoices[i].ID != existingInv.ID {
+					prevInvoice = &priorInvoices[i]
+					break
+				}
+			}
+		}
+
+		arrears := 0.0
+		if prevInvoice != nil {
+			arrears = prevInvoice.RemainingAmount
+		} else {
+			arrears = customer.Arrears
+		}
+		totalDue := math.Round((totalAmount+arrears)*100) / 100
 
 		approvalStatus := req.ApprovalStatus
 		if approvalStatus == "" {
@@ -124,8 +187,7 @@ func (s *ReadingService) CreateReading(req CreateReadingRequest) (*ReadingResult
 			mutationID = &generatedUUID
 		}
 
-		// 7. Insert MeterReading
-		now := time.Now().UTC()
+		// 8. Insert MeterReading
 		reading := models.MeterReading{
 			CustomerID:       &customer.ID,
 			ReadingValue:     req.ReadingValue,
@@ -133,35 +195,23 @@ func (s *ReadingService) CreateReading(req CreateReadingRequest) (*ReadingResult
 			CollectorName:    req.CollectorName,
 			CollectorUserID:  req.CollectorUserID,
 			ApprovalStatus:   approvalStatus,
-			LostUnits:        req.LostUnits,
 			ClientMutationID: mutationID,
 		}
 		if err := tx.Create(&reading).Error; err != nil {
 			return fmt.Errorf("failed to save reading: %w", err)
 		}
 
-		// 8. Generate Composite Deterministic Invoice Number with Canonical Cycle
-		cycle := FormatCanonicalCycle(req.BillingCycle)
-		if cycle == "" {
-			cycle = FormatCanonicalCycle(now.Format("2006-01-2"))
-		}
 		invNumber := fmt.Sprintf("INV-%s-%s", strings.ReplaceAll(cycle, " ", "-"), customer.SubscriberNumber)
 		dueDate := now.AddDate(0, 0, graceDays)
 
-		// 9. Check if an invoice already exists for this customer in the target cycle
-		var existingInv models.Invoice
-		aliases := getCycleAliases(cycle)
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("customer_id = ? AND (billing_cycle = ? OR billing_cycle IN ?)", customer.ID, cycle, aliases).
-			First(&existingInv).Error; err == nil && existingInv.ID > 0 {
-			
+		// 9. Update existing invoice or insert new invoice
+		if existingInv.ID > 0 {
 			// Update existing invoice instead of creating duplicate row
 			existingInv.ReadingID = &reading.ID
 			existingInv.BillingCycle = &cycle
 			existingInv.PreviousReading = previousReadingValue
 			existingInv.CurrentReading = req.ReadingValue
 			existingInv.Consumption = consumption
-			existingInv.LostUnits = req.LostUnits
 			existingInv.ConsumptionValue = consumptionValue
 			existingInv.KwhPriceSnapshot = kwhPrice
 			existingInv.FixedFeeSnapshot = fixedFee
@@ -169,7 +219,7 @@ func (s *ReadingService) CreateReading(req CreateReadingRequest) (*ReadingResult
 			existingInv.TotalAmount = totalAmount
 			existingInv.TotalDue = totalDue
 			existingInv.RemainingAmount = math.Round((totalDue-existingInv.PaidAmount)*100) / 100
-			if existingInv.RemainingAmount <= 0 && existingInv.PaidAmount > 0 {
+			if existingInv.RemainingAmount <= 0 {
 				existingInv.Status = "Paid"
 			} else if existingInv.PaidAmount > 0 {
 				existingInv.Status = "Partially_Paid"
@@ -184,6 +234,10 @@ func (s *ReadingService) CreateReading(req CreateReadingRequest) (*ReadingResult
 			result.Invoice = existingInv
 		} else {
 			// Insert new invoice if none existed
+			newStatus := "Unpaid"
+			if totalDue <= 0 {
+				newStatus = "Paid"
+			}
 			invoice := models.Invoice{
 				CustomerID:         &customer.ID,
 				ReadingID:          &reading.ID,
@@ -191,7 +245,6 @@ func (s *ReadingService) CreateReading(req CreateReadingRequest) (*ReadingResult
 				PreviousReading:    previousReadingValue,
 				CurrentReading:     req.ReadingValue,
 				Consumption:        consumption,
-				LostUnits:          req.LostUnits,
 				ConsumptionValue:   consumptionValue,
 				KwhPriceSnapshot:   kwhPrice,
 				FixedFeeSnapshot:   fixedFee,
@@ -203,7 +256,7 @@ func (s *ReadingService) CreateReading(req CreateReadingRequest) (*ReadingResult
 				TotalAmount:        totalAmount,
 				DueDate:            dueDate,
 				ApprovalStatus:     approvalStatus,
-				Status:             "Unpaid",
+				Status:             newStatus,
 				CreatedAt:          &now,
 			}
 
@@ -211,6 +264,19 @@ func (s *ReadingService) CreateReading(req CreateReadingRequest) (*ReadingResult
 				return fmt.Errorf("failed to save invoice: %w", err)
 			}
 			result.Invoice = invoice
+		}
+
+		// 9.1 Credit Roll-Forward: تصفير أرصدة الفواتير السابقة السالبة التي تم استيعابها في الدورة الحالية
+		if arrears < 0 {
+			if err := tx.Model(&models.Invoice{}).
+				Where("customer_id = ? AND remaining_amount < 0 AND id != ?", customer.ID, result.Invoice.ID).
+				Updates(map[string]interface{}{
+					"remaining_amount": 0.00,
+					"status":           "Paid",
+					"updated_at":       time.Now().UTC(),
+				}).Error; err != nil {
+				return fmt.Errorf("failed to roll forward previous invoice credits: %w", err)
+			}
 		}
 
 		// 10. In-Transaction Atomic Audit Log
@@ -229,6 +295,22 @@ func (s *ReadingService) CreateReading(req CreateReadingRequest) (*ReadingResult
 		})
 
 		result.Reading = reading
+
+		// 11. تحديث آخر قراءة للمشترك بأحدث قراءة زمنياً فقط لمنع تراجع العداد (Chronological Guard)
+		var latestReading float64
+		if err := tx.Model(&models.MeterReading{}).
+			Where("customer_id = ? AND approval_status != 'REJECTED'", customer.ID).
+			Order("reading_date DESC, id DESC").
+			Limit(1).
+			Pluck("reading_value", &latestReading).Error; err == nil {
+			tx.Model(&models.Customer{}).Where("id = ?", customer.ID).Update("last_reading", latestReading)
+		}
+
+		// 12. مزامنة مديونية المشترك مع الدورة الجديدة في جدول customers
+		if err := SyncCustomerFinancials(tx, customer.ID); err != nil {
+			return fmt.Errorf("failed to sync customer financials after reading: %w", err)
+		}
+
 		return nil
 	})
 

@@ -81,12 +81,12 @@ type Customer struct {
 	UpdatedAt          *time.Time        `gorm:"column:updated_at" json:"updated_at,omitempty"`
 
 	CurrentReading   float64  `gorm:"->" json:"current_reading"`
-	LastReading      float64  `gorm:"->" json:"last_reading"`
+	LastReading      float64  `gorm:"type:numeric(12,2);default:0;column:last_reading" json:"last_reading"`
 	PreviousReading  float64  `gorm:"->" json:"previous_reading"`
-	TotalDue         float64  `gorm:"->" json:"total_due"`
+	TotalDue         float64  `gorm:"type:numeric(12,2);default:0;column:total_due" json:"total_due"`
 	Arrears          float64  `gorm:"->" json:"arrears"`
 	PaidAmount       float64  `gorm:"->" json:"paid_amount"`
-	Balance          float64  `gorm:"->" json:"balance"`
+	Balance          float64  `gorm:"type:numeric(12,2);default:0;column:balance" json:"balance"`
 	AvailableCredits float64  `gorm:"->" json:"available_credits"`
 	LatestInvoice    *Invoice `gorm:"->" json:"latest_invoice,omitempty"`
 
@@ -113,7 +113,6 @@ type MeterReading struct {
 	ClientMutationID *string    `gorm:"type:uuid;column:client_mutation_id" json:"client_mutation_id,omitempty"`
 	RejectionReason  *string    `gorm:"type:text;column:rejection_reason" json:"rejection_reason,omitempty"`
 	WhatsAppSent     bool       `gorm:"default:false;column:whatsapp_sent" json:"whatsapp_sent"`
-	LostUnits        float64    `gorm:"type:numeric(10,2);default:0;column:lost_units" json:"lost_units"`
 	CreatedAt        *time.Time `gorm:"column:created_at" json:"created_at,omitempty"`
 	UpdatedAt        *time.Time `gorm:"column:updated_at" json:"updated_at,omitempty"`
 }
@@ -132,7 +131,6 @@ type Invoice struct {
 	PreviousReading  float64             `gorm:"type:numeric(10,2);default:0;column:previous_reading" json:"previous_reading"`
 	CurrentReading   float64             `gorm:"type:numeric(10,2);default:0;column:current_reading" json:"current_reading"`
 	Consumption      float64             `gorm:"type:numeric(10,2);default:0;column:consumption" json:"consumption"`
-	LostUnits        float64             `gorm:"type:numeric(10,2);default:0;column:lost_units" json:"lost_units"`
 	ConsumptionValue float64             `gorm:"type:numeric(10,2);default:0;column:consumption_value" json:"consumption_value"`
 	KwhPriceSnapshot float64             `gorm:"type:numeric(10,2);not null;column:kwh_price_snapshot" json:"kwh_price_snapshot"`
 	FixedFeeSnapshot float64             `gorm:"type:numeric(10,2);not null;column:fixed_fee_snapshot" json:"fixed_fee_snapshot"`

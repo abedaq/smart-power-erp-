@@ -38,10 +38,29 @@ type DiagnosticUploadResult struct {
 }
 
 func NewDiagnosticsService(cfg *config.Config) *DiagnosticsService {
+	supaURL := ""
+	anonKey := ""
+	if cfg != nil {
+		supaURL = cfg.SupabaseURL
+		anonKey = cfg.SupabaseAnonKey
+	}
+	if supaURL == "" {
+		supaURL = os.Getenv("SUPABASE_URL")
+	}
+	if supaURL == "" {
+		supaURL = "https://pkuoytiickgbtfeffmxq.supabase.co"
+	}
+	if anonKey == "" {
+		anonKey = os.Getenv("SUPABASE_ANON_KEY")
+	}
+	if anonKey == "" {
+		anonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBrdW95dGlpY2tnYnRmZWZmbXhxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg0NDk0MjAsImV4cCI6MjEwNDAyNTQyMH0.9aGjAHdibP2uKiiTQ8XuGsYmwsZeWsA3hVQ9gD4xq7Q"
+	}
+
 	return &DiagnosticsService{
 		cfg:         cfg,
-		supabaseURL: defaultSupabaseURL,
-		anonKey:     defaultAnonKey,
+		supabaseURL: supaURL,
+		anonKey:     anonKey,
 		httpClient: &http.Client{
 			Timeout: 45 * time.Second,
 		},

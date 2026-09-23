@@ -5,7 +5,7 @@
 ; =====================================================================
 
 #define MyAppName "Smart Power ERP"
-#define MyAppVersion "3.4.4.1"
+#define MyAppVersion "3.4.5.4"
 #define MyAppPublisher "SmartPower Technologies"
 #define MyAppExeName "SmartPowerERP.exe"
 
@@ -80,7 +80,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDi
 ; ---------------------------------------------------------------------
 ; A. Install Visual C++ 2015-2022 x64 Redistributable silently if missing
 ; ---------------------------------------------------------------------
-Filename: "{tmp}\VC_redist.x64.exe"; Parameters: "/install /quiet /norestart"; Check: NeedInstallVCRedist; StatusMsg: "جاري تثبيت مكتبات مايكروسوفت الأساسية (Visual C++ 2015-2022)..."; Flags: runhidden
+Filename: "{tmp}\VC_redist.x64.exe"; Parameters: "/install /quiet /norestart"; Check: NeedInstallVCRedist and IsAdminInstallMode; StatusMsg: "جاري تثبيت مكتبات مايكروسوفت الأساسية (Visual C++ 2015-2022)..."; Flags: runhidden
 
 ; ---------------------------------------------------------------------
 ; B. Install Microsoft Edge WebView2 Runtime silently if missing
@@ -176,14 +176,30 @@ begin
   if FileExists(OldPath) then DeleteFile(OldPath);
 end;
 
-function InitializeSetup(): Boolean;
+procedure StopSmartPowerProcesses();
 var
   ResultCode: Integer;
+  PgCtlPath: String;
 begin
   Exec('taskkill.exe', '/F /IM SmartPowerERP.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('taskkill.exe', '/F /IM updater.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('taskkill.exe', '/F /IM postgres.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  // 1. Graceful shutdown of embedded PostgreSQL if pg_ctl.exe exists in default install directory
+  PgCtlPath := ExpandConstant('{localappdata}\Programs\Smart Power ERP\pgsql\bin\pg_ctl.exe');
+  if FileExists(PgCtlPath) then
+  begin
+    Exec(PgCtlPath, ExpandConstant('stop -D "{localappdata}\SmartPowerERP\data" -m fast'), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
+
+  // 2. Targeted termination strictly of the process listening on port 15432 using PowerShell with ExecutionPolicy Bypass
+  Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -NonInteractive -Command "Get-NetTCPConnection -LocalPort 15432 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
   Sleep(500);
+end;
+
+function InitializeSetup(): Boolean;
+begin
+  StopSmartPowerProcesses();
   CleanLegacyShortcuts();
   Result := True;
 end;
@@ -197,15 +213,10 @@ begin
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
-var
-  ResultCode: Integer;
 begin
   if CurUninstallStep = usUninstall then
   begin
-    Exec('taskkill.exe', '/F /IM SmartPowerERP.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec('taskkill.exe', '/F /IM updater.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec('taskkill.exe', '/F /IM postgres.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Sleep(500);
+    StopSmartPowerProcesses();
     CleanLegacyShortcuts();
   end
   else if CurUninstallStep = usPostUninstall then
@@ -213,3 +224,4 @@ begin
     DelTree(ExpandConstant('{app}'), True, True, True);
   end;
 end;
+

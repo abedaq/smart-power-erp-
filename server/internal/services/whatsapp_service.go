@@ -38,10 +38,12 @@ type WhatsAppService struct {
 	wakeChan      chan struct{}
 	mu            sync.RWMutex
 	reconnectMu   sync.Mutex
-	currentQR     string
-	status        string // "CONNECTED", "CONNECTING", "RECONNECTING", "SCAN_QR_CODE", "DISCONNECTED"
-	ctx           context.Context
-	cancel        context.CancelFunc
+	currentQR            string
+	status               string // "CONNECTED", "CONNECTING", "RECONNECTING", "SCAN_QR_CODE", "DISCONNECTED"
+	lastStreamReplacedAt time.Time
+	streamReplacedCount  int
+	ctx                  context.Context
+	cancel               context.CancelFunc
 }
 
 func NewWhatsAppService(db *gorm.DB, cfg *config.Config, renderService *InvoiceRenderService) (*WhatsAppService, error) {
@@ -223,6 +225,7 @@ func (s *WhatsAppService) handleEvent(rawEvt interface{}) {
 		s.mu.Lock()
 		s.status = "CONNECTED"
 		s.currentQR = ""
+		s.streamReplacedCount = 0
 		s.mu.Unlock()
 
 		pushName := ""
@@ -268,15 +271,60 @@ func (s *WhatsAppService) handleEvent(rawEvt interface{}) {
 		s.mu.Lock()
 		s.status = "CONNECTED"
 		s.currentQR = ""
+		s.streamReplacedCount = 0
 		s.mu.Unlock()
 		s.persistSessionStatus("CONNECTED", "")
 
 	case *events.StreamReplaced:
-		log.Println("⚠️ [WhatsApp] Stream replaced by another active session. Reconnecting...")
+		log.Println("⚠️ [WhatsApp] Stream replaced by another active session. Entering safe cooldown...")
 		s.mu.Lock()
-		s.status = "RECONNECTING"
+		nowLocal := time.Now()
+		if nowLocal.Sub(s.lastStreamReplacedAt) < 2*time.Minute {
+			s.streamReplacedCount++
+		} else {
+			s.streamReplacedCount = 1
+		}
+		s.lastStreamReplacedAt = nowLocal
+		// Guard: Save strictly as DISCONNECTED to honor DB chk_wa_session_status constraint
+		s.status = "DISCONNECTED"
+		count := s.streamReplacedCount
+		hub := s.eventHub
 		s.mu.Unlock()
-		go s.triggerAutoReconnect()
+
+		// 1. Persist strictly as DISCONNECTED in database
+		s.persistSessionStatus("DISCONNECTED", "")
+
+		// 2. Broadcast STREAM_REPLACED_CONFLICT to UI via EventHub with 45s cooldown
+		if hub != nil {
+			hub.Broadcast("WHATSAPP_STATUS_CHANGED", map[string]interface{}{
+				"status":           "DISCONNECTED",
+				"reason":           "STREAM_REPLACED_CONFLICT",
+				"cooldown_seconds": 45,
+				"conflict_count":   count,
+				"message":          "تم فتح واتساب من متصفح أو جهاز آخر. تم إيقاف الاتصال مؤقتاً لتجنب حظر الرقم.",
+			})
+		}
+
+		if count >= 2 {
+			log.Printf("🛑 [WhatsApp Security] Repeated StreamReplaced detected (%d times within 2m). Automatic reconnect suspended to protect number from Meta ban.", count)
+			return
+		}
+
+		// 3. Single conflict: start a 45-second delayed safe reconnect
+		go func() {
+			log.Println("⏳ [WhatsApp Cooldown] StreamReplaced cooldown active (45 seconds). Waiting before safe reconnect...")
+			time.Sleep(45 * time.Second)
+			s.mu.RLock()
+			elapsed := time.Since(s.lastStreamReplacedAt)
+			isDisconnected := s.status == "DISCONNECTED"
+			c := s.streamReplacedCount
+			s.mu.RUnlock()
+
+			if elapsed >= 45*time.Second && isDisconnected && c < 2 {
+				log.Println("🔄 [WhatsApp Cooldown] 45s cooldown elapsed after StreamReplaced. Attempting safe reconnect...")
+				s.triggerAutoReconnect()
+			}
+		}()
 
 	case *events.ConnectFailure:
 		log.Printf("⚠️ [WhatsApp] Connection failure: %v", evt.Reason)
@@ -318,7 +366,16 @@ func (s *WhatsAppService) startHeartbeatWatchdog() {
 					"updated_at":        now,
 				})
 			} else {
-				// 2. Connection dropped or idle: trigger auto-reconnection
+				// 2. Connection dropped or idle: check cooldown before auto-reconnection
+				s.mu.RLock()
+				sinceReplaced := time.Since(s.lastStreamReplacedAt)
+				repCount := s.streamReplacedCount
+				s.mu.RUnlock()
+
+				if sinceReplaced < 45*time.Second || (repCount >= 2 && sinceReplaced < 2*time.Minute) {
+					continue
+				}
+
 				log.Println("⚠️ [WhatsApp Watchdog] WebSocket not active or dropped. Triggering automatic reconnection...")
 				s.mu.Lock()
 				if s.client.Store.ID != nil {
@@ -339,6 +396,20 @@ func (s *WhatsAppService) triggerAutoReconnect() {
 		return
 	}
 	defer s.reconnectMu.Unlock()
+
+	s.mu.RLock()
+	sinceReplaced := time.Since(s.lastStreamReplacedAt)
+	repCount := s.streamReplacedCount
+	s.mu.RUnlock()
+
+	if repCount >= 2 && sinceReplaced < 2*time.Minute {
+		log.Printf("⚠️ [WhatsApp Reconnect] Reconnect blocked: repeated StreamReplaced conflict (%d times). Resolve other device first.", repCount)
+		return
+	}
+	if sinceReplaced < 45*time.Second {
+		log.Printf("⚠️ [WhatsApp Reconnect] Reconnect postponed: cooldown in progress (%v remaining).", (45*time.Second - sinceReplaced).Round(time.Second))
+		return
+	}
 
 	if s.client == nil || s.client.Store.ID == nil {
 		return

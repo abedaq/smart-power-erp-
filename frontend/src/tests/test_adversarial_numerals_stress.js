@@ -150,7 +150,6 @@ function simulateTypingSession(initialValue, keystrokes, simulateBlur = true) {
     phone: '771234567',
     prevReading: 1000,
     currReading: 1000,
-    lostUnits: 0,
     unitPrice: 1400,
     serviceFee: 1000,
     arrears: 0,
@@ -255,7 +254,6 @@ const testRow1 = {
   phone: '771234567',
   prevReading: 1200,
   currReading: 1350,
-  lostUnits: 10,
   unitPrice: 1400,
   serviceFee: 1000,
   arrears: 12000,
@@ -265,9 +263,8 @@ const testRow1 = {
 const comp1 = computeRowFinancials(testRow1);
 assert(comp1.units === 150, 'Row 1 Units: 1350 - 1200 = 150');
 assert(comp1.consumptionCost === 210000, 'Row 1 Consumption Cost: 150 * 1400 = 210,000');
-assert(comp1.lostUnitsCost === 14000, 'Row 1 Lost Units Cost: 10 * 1400 = 14,000');
-assert(comp1.totalDue === 237000, 'Row 1 Total Due: 210000 + 14000 + 1000 + 12000 = 237,000');
-assert(comp1.remaining === 37000, 'Row 1 Remaining: 237000 - 200000 = 37,000');
+assert(comp1.totalDue === 223000, 'Row 1 Total Due: 210000 + 1000 + 12000 = 223,000');
+assert(comp1.remaining === 23000, 'Row 1 Remaining: 223000 - 200000 = 23,000');
 
 // 3.2 Negative Consumption Protection (curr < prev)
 const testRow2 = {
@@ -278,15 +275,15 @@ const testRow2 = {
 const comp2 = computeRowFinancials(testRow2);
 assert(comp2.units === 0, 'Row 2: Negative consumption prevented: Math.max(0, 1200 - 1500) = 0');
 assert(comp2.consumptionCost === 0, 'Row 2: Consumption cost is 0');
-assert(comp2.totalDue === comp2.lostUnitsCost + Number(testRow2.serviceFee) + Number(testRow2.arrears), 'Row 2: Total due does not subtract consumption');
+assert(comp2.totalDue === Number(testRow2.serviceFee) + Number(testRow2.arrears), 'Row 2: Total due does not subtract consumption');
 
 // 3.3 Overpayment Scenario (Paid > Total Due) -> Negative Remaining (Customer Credit)
 const testRow3 = {
   ...testRow1,
-  paidAmount: 250000, // Total due is 237,000
+  paidAmount: 250000, // Total due is 223,000
 };
 const comp3 = computeRowFinancials(testRow3);
-assert(comp3.remaining === -13000, 'Row 3: Overpayment yields negative remaining (credit balance of -13,000)');
+assert(comp3.remaining === -27000, 'Row 3: Overpayment yields negative remaining (credit balance of -27,000)');
 
 // 3.4 Missing / Undefined / String Fields Resilience
 const testRow4 = {
@@ -299,7 +296,6 @@ const testRow4 = {
   phone: '',
   prevReading: '',
   currReading: '100',
-  lostUnits: undefined,
   unitPrice: '1400',
   serviceFee: null,
   arrears: '',
@@ -307,7 +303,6 @@ const testRow4 = {
 };
 const comp4 = computeRowFinancials(testRow4);
 assert(comp4.units === 100, 'Row 4: Empty prevReading treated as 0 (units = 100)');
-assert(comp4.lostUnitsCost === 0, 'Row 4: Undefined lostUnits treated as 0');
 assert(comp4.serviceFee === null, 'Row 4: Service fee null retained on row');
 assert(comp4.consumptionCost === 140000, 'Row 4: String unitPrice parsed correctly');
 assert(comp4.totalDue === 140000, 'Row 4: Total due computed cleanly without NaN');
@@ -342,7 +337,6 @@ for (let i = 1; i <= 1000; i++) {
     phone: `77${String(i).padStart(7, '0')}`,
     prevReading: i * 10,
     currReading: i * 10 + 50,
-    lostUnits: 2,
     unitPrice: 1400,
     serviceFee: 1000,
     arrears: 500,
@@ -369,8 +363,8 @@ const waText = buildWhatsAppText(comp1, 'أغسطس - 2026');
 const arabicDigitRegex = /[\u0660-\u0669\u06F0-\u06F9]/;
 assert(!arabicDigitRegex.test(waText), 'WhatsApp message contains zero Eastern Arabic digits');
 assert(waText.includes('1,350'), 'WhatsApp message formats current reading with English comma');
-assert(waText.includes('237,000'), 'WhatsApp message formats total due with English comma');
-assert(waText.includes('37,000'), 'WhatsApp message formats remaining balance with English comma');
+assert(waText.includes('223,000'), 'WhatsApp message formats total due with English comma');
+assert(waText.includes('23,000'), 'WhatsApp message formats remaining balance with English comma');
 assert(!waText.includes('NaN'), 'WhatsApp message contains zero NaN instances');
 
 // Phone tests

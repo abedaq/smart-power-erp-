@@ -76,7 +76,6 @@ function generateBenchmarkDataset(rowCount) {
       phone: `77${String(id).padStart(7, '0')}`,
       prevReading: (id * 15) % 100000,
       currReading: ((id * 15) % 100000) + (id % 450) + 10,
-      lostUnits: id % 5,
       unitPrice: 1400,
       serviceFee: 1000,
       arrears: (id % 10) * 1500,
@@ -145,7 +144,6 @@ const zeroRow = computeRowFinancials({
   id: 1,
   prevReading: 0,
   currReading: 0,
-  lostUnits: 0,
   unitPrice: 0,
   serviceFee: 0,
   arrears: 0,
@@ -162,7 +160,6 @@ const nonMonotonicRow = computeRowFinancials({
   id: 2,
   prevReading: 5000,
   currReading: 3000, // Reversed!
-  lostUnits: 10,
   unitPrice: 1400,
   serviceFee: 1000,
   arrears: 500,
@@ -170,16 +167,14 @@ const nonMonotonicRow = computeRowFinancials({
 });
 assert(nonMonotonicRow.units === 0, 'Non-monotonic: units clamped to 0 via Math.max(0, curr - prev)');
 assert(nonMonotonicRow.consumptionCost === 0, 'Non-monotonic: consumption cost is 0');
-assert(nonMonotonicRow.lostUnitsCost === 14000, 'Non-monotonic: lostUnitsCost calculated normally (10 * 1400 = 14000)');
-assert(nonMonotonicRow.totalDue === 15500, 'Non-monotonic: totalDue = 0 + 14000 + 1000 + 500 = 15,500');
-assert(nonMonotonicRow.remaining === 13500, 'Non-monotonic: remaining = 15500 - 2000 = 13,500');
+assert(nonMonotonicRow.totalDue === 1500, 'Non-monotonic: totalDue = 0 + 1000 + 500 = 1,500');
+assert(nonMonotonicRow.remaining === -500, 'Non-monotonic: remaining = 1500 - 2000 = -500');
 
 // 2.3 Astronomical / Huge Numbers (Stress overflow & precision)
 const hugeRow = computeRowFinancials({
   id: 3,
   prevReading: '100000000',
   currReading: '100050000', // 50,000 units
-  lostUnits: '1000',
   unitPrice: '1400',
   serviceFee: '100000',
   arrears: '5000000000', // 5 Billion YER arrears
@@ -187,9 +182,8 @@ const hugeRow = computeRowFinancials({
 });
 assert(hugeRow.units === 50000, 'Huge numbers: 50,000 units parsed');
 assert(hugeRow.consumptionCost === 70000000, 'Huge numbers: consumption cost 70,000,000 YER');
-assert(hugeRow.lostUnitsCost === 1400000, 'Huge numbers: lost units cost 1,400,000 YER');
-assert(hugeRow.totalDue === 70000000 + 1400000 + 100000 + 5000000000, 'Huge numbers: total due matches 5,071,500,000');
-assert(hugeRow.remaining === (5071500000 - 2000000000), 'Huge numbers: remaining matches 3,071,500,000');
+assert(hugeRow.totalDue === 70000000 + 100000 + 5000000000, 'Huge numbers: total due matches 5,070,100,000');
+assert(hugeRow.remaining === (5070100000 - 2000000000), 'Huge numbers: remaining matches 3,070,100,000');
 assert(!Number.isNaN(hugeRow.totalDue), 'Huge numbers: no NaN generated');
 assert(Number.isFinite(hugeRow.totalDue), 'Huge numbers: result is finite');
 
@@ -198,14 +192,12 @@ const floatRow = computeRowFinancials({
   id: 4,
   prevReading: '1000.1',
   currReading: '1000.3', // 0.2 units
-  lostUnits: '0.3',
   unitPrice: '1400.5',
   serviceFee: '100.25',
   arrears: '50.75',
   paidAmount: '300.50',
 });
 assert(Math.abs(floatRow.units - 0.2) < 1e-9, `Float precision: units is ~0.2 (actual: ${floatRow.units})`);
-assert(Math.abs(floatRow.lostUnitsCost - (0.3 * 1400.5)) < 1e-9, 'Float precision: lost units cost accurate');
 assert(!Number.isNaN(floatRow.totalDue), 'Float precision: totalDue is not NaN');
 assert(!Number.isNaN(floatRow.remaining), 'Float precision: remaining is not NaN');
 
@@ -214,13 +206,12 @@ const creditRow = computeRowFinancials({
   id: 5,
   prevReading: 1000,
   currReading: 1100, // 100 units
-  lostUnits: 0,
   unitPrice: 1400,
   serviceFee: 1000,
   arrears: -25000, // Negative arrears = 25,000 credit
   paidAmount: 50000,
 });
-assert(creditRow.totalDue === (140000 + 0 + 1000 - 25000), 'Negative arrears: total due reflects credit deduction (116,000)');
+assert(creditRow.totalDue === (140000 + 1000 - 25000), 'Negative arrears: total due reflects credit deduction (116,000)');
 assert(creditRow.remaining === (116000 - 50000), 'Negative arrears: remaining is 66,000');
 
 // 2.6 Massive Overpayment (Resulting in negative remaining balance / credit)
@@ -228,7 +219,6 @@ const overpaidRow = computeRowFinancials({
   id: 6,
   prevReading: 1000,
   currReading: 1050, // 50 units * 1400 = 70,000
-  lostUnits: 0,
   unitPrice: 1400,
   serviceFee: 1000,
   arrears: 0,
@@ -242,7 +232,6 @@ const corruptedRow = computeRowFinancials({
   id: 7,
   prevReading: null,
   currReading: undefined,
-  lostUnits: 'invalid_string',
   unitPrice: '',
   serviceFee: '   ',
   arrears: NaN,
@@ -250,7 +239,6 @@ const corruptedRow = computeRowFinancials({
 });
 assert(corruptedRow.units === 0, 'Corrupted row: units safely evaluates to 0');
 assert(corruptedRow.consumptionCost === 0, 'Corrupted row: consumptionCost is 0');
-assert(corruptedRow.lostUnitsCost === 0, 'Corrupted row: lostUnitsCost is 0');
 assert(corruptedRow.totalDue === 0, 'Corrupted row: totalDue is 0 (zero crash/NaN)');
 assert(corruptedRow.remaining === 0, 'Corrupted row: remaining is 0');
 
@@ -259,14 +247,12 @@ const unicodeRow = computeRowFinancials({
   id: 8,
   prevReading: '\u200F1,200\u200E',
   currReading: '\u200B1,450.50\u200C',
-  lostUnits: '١٠', // Eastern Arabic 10
   unitPrice: '١,٤٠٠', // Eastern Arabic 1,400 with comma
   serviceFee: '1,000',
   arrears: '12,500',
   paidAmount: '200,000',
 });
 assert(unicodeRow.units === 250.5, `Unicode & Commas: units parsed as 250.5 (actual: ${unicodeRow.units})`);
-assert(unicodeRow.lostUnitsCost === (10 * 1400), `Unicode & Commas: lost units cost is 14,000 (actual: ${unicodeRow.lostUnitsCost})`);
 assert(unicodeRow.consumptionCost === (250.5 * 1400), `Unicode & Commas: consumption cost is 350,700 (actual: ${unicodeRow.consumptionCost})`);
 assert(!Number.isNaN(unicodeRow.totalDue), 'Unicode & Commas: total due is free of NaN');
 assert(!Number.isNaN(unicodeRow.remaining), 'Unicode & Commas: remaining is free of NaN');
@@ -362,7 +348,6 @@ const stressRows = generateBenchmarkDataset(5000);
 stressRows[10].currReading = stressRows[10].prevReading - 500; // Negative consumption
 stressRows[20].arrears = -35000; // Negative arrears
 stressRows[30].paidAmount = 1000000; // Large overpayment
-stressRows[40].lostUnits = '50'; // String lost units
 stressRows[50].serviceFee = '2500'; // String service fee
 stressRows[60].currReading = ''; // Empty reading
 stressRows[70].paidAmount = undefined; // Undefined paid
@@ -374,7 +359,6 @@ let invariantsPassed = true;
 let nanCount = 0;
 
 let manualUnitsSum = 0;
-let manualLostUnitsSum = 0;
 let manualArrearsSum = 0;
 let manualConsumptionCostSum = 0;
 let manualTotalDueSum = 0;
@@ -385,23 +369,21 @@ for (let i = 0; i < computedStress.length; i++) {
   const r = computedStress[i];
   
   // Check for NaN
-  if (Number.isNaN(r.units) || Number.isNaN(r.consumptionCost) || Number.isNaN(r.lostUnitsCost) || Number.isNaN(r.totalDue) || Number.isNaN(r.remaining)) {
+  if (Number.isNaN(r.units) || Number.isNaN(r.consumptionCost) || Number.isNaN(r.totalDue) || Number.isNaN(r.remaining)) {
     nanCount++;
   }
 
   // Row invariant check
   if (r.units < 0) invariantsPassed = false;
   if (r.consumptionCost !== (r.units * Number(r.unitPrice || 0))) invariantsPassed = false;
-  if (r.lostUnitsCost !== (Number(r.lostUnits || 0) * Number(r.unitPrice || 0))) invariantsPassed = false;
   
-  const expectedTotalDue = r.consumptionCost + r.lostUnitsCost + Number(r.serviceFee || 0) + Number(r.arrears || 0);
+  const expectedTotalDue = r.consumptionCost + Number(r.serviceFee || 0) + Number(r.arrears || 0);
   if (Math.abs(r.totalDue - expectedTotalDue) > 1e-6) invariantsPassed = false;
 
   const expectedRemaining = r.totalDue - Number(r.paidAmount || 0);
   if (Math.abs(r.remaining - expectedRemaining) > 1e-6) invariantsPassed = false;
 
   manualUnitsSum += r.units;
-  manualLostUnitsSum += Number(r.lostUnits || 0);
   manualArrearsSum += Number(r.arrears || 0);
   manualConsumptionCostSum += r.consumptionCost;
   manualTotalDueSum += r.totalDue;
@@ -413,7 +395,6 @@ assert(nanCount === 0, `Mathematical Invariants: Exactly 0 NaN values across 5,0
 assert(invariantsPassed === true, 'Mathematical Invariants: 100% of row-level formulas strictly satisfied');
 assert(totalsStress.visibleCount === 5000, 'Totals Invariant: visibleCount matches 5,000');
 assert(Math.abs(totalsStress.totalUnitsSum - manualUnitsSum) < 1e-4, 'Totals Invariant: totalUnitsSum matches manual sum');
-assert(Math.abs(totalsStress.totalLostUnitsSum - manualLostUnitsSum) < 1e-4, 'Totals Invariant: totalLostUnitsSum matches manual sum');
 assert(Math.abs(totalsStress.totalArrearsSum - manualArrearsSum) < 1e-4, 'Totals Invariant: totalArrearsSum matches manual sum');
 assert(Math.abs(totalsStress.totalConsumptionCostSum - manualConsumptionCostSum) < 1e-4, 'Totals Invariant: totalConsumptionCostSum matches manual sum');
 assert(Math.abs(totalsStress.totalDueSum - manualTotalDueSum) < 1e-4, 'Totals Invariant: totalDueSum matches manual sum');

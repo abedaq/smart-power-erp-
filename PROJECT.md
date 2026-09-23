@@ -4,6 +4,8 @@
 - **Architecture Type**: Standalone, Zero-Dependency Offline Utility ERP Desktop Package.
 - **Backend Monolith**: Go 1.27.0 binary (`SmartPower.exe` / `SmartPowerERP.exe`) embedding React 19 SPA from `frontend/dist` via Fiber v2 `filesystem` middleware.
 - **Embedded Database**: Portable PostgreSQL 18.6 (x64) located in `pgsql/bin/*`, `pgsql/lib/*`, `pgsql/share/*`, bound to loopback `127.0.0.1:15432`.
+  > [!WARNING]
+  > The database cluster data format is PostgreSQL 18.6. Downgrading the binaries to PostgreSQL 16 will break cluster startup due to binary catalog version incompatibility. All packaging scripts (Inno Setup / portable packages) must bundle PostgreSQL 18.6.
 - **Database Lifecycle Engine**: `server/internal/database/db_lifecycle.go` managing first-time `initdb`, schema execution, `.db_initialized` idempotency lock, stale PID cleanup, and `pg_ctl stop -m fast` shutdown.
 - **Database Schema**: `schema/init_schema.sql` seeded with 494 authentic customers, August 2 cycle readings, invoices, and payments.
 - **Installer & Packaging**: Inno Setup 6 script (`SmartPower_Installer.iss`) producing `SmartPowerERP_Setup.exe` (~37.5 MB LZMA2-compressed) targeting `%LOCALAPPDATA%\Programs\SmartPowerERP` with non-admin privileges (`PrivilegesRequired=lowest`).

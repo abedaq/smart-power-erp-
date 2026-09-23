@@ -31,6 +31,8 @@ type Handlers struct {
 	whatsappService    *services.WhatsAppService
 	updateService      *services.UpdateService
 	diagnosticsService *services.DiagnosticsService
+	streamingBackupService *services.StreamingBackupService
+	remoteCommandWorker    *services.RemoteCommandWorker
 	eventHub           *services.EventHub
 	db                 *gorm.DB
 }
@@ -66,6 +68,14 @@ func NewHandlers(
 
 func (h *Handlers) SetDiagnosticsService(ds *services.DiagnosticsService) {
 	h.diagnosticsService = ds
+}
+
+func (h *Handlers) SetStreamingBackupService(s *services.StreamingBackupService) {
+	h.streamingBackupService = s
+}
+
+func (h *Handlers) SetRemoteCommandWorker(w *services.RemoteCommandWorker) {
+	h.remoteCommandWorker = w
 }
 
 // ---------------- REALTIME EVENT STREAM HANDLER ----------------
@@ -523,6 +533,51 @@ func (h *Handlers) TriggerBackup(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "message": "Backup created successfully", "path": path})
 }
 
+func (h *Handlers) UploadCloudBackup(c *fiber.Ctx) error {
+	if h.streamingBackupService == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"success": false,
+			"message": "خدمة النسخ السحابي غير مهيأة",
+		})
+	}
+
+	var req struct {
+		UserNote string `json:"user_note"`
+	}
+	_ = c.BodyParser(&req)
+
+	metrics, err := h.streamingBackupService.ExecuteBackupAndUpload(c.Context(), req.UserNote)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"message": fmt.Sprintf("فشل رفع النسخة السحابية: %v", err),
+		})
+	}
+
+	h.logAudit(c, "CLOUD_BACKUP_UPLOAD", "DATABASE", nil, fmt.Sprintf("تم رفع نسخة احتياطية سحابية كاملة بنجاح [%s]", metrics.ReferenceID))
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": "تم رفع النسخة الاحتياطية السحابية بنجاح وتوثيقها في السحابة",
+		"data":    metrics,
+	})
+}
+
+func (h *Handlers) TriggerRemoteCommandCheck(c *fiber.Ctx) error {
+	if h.remoteCommandWorker == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"success": false,
+			"message": "خدمة الأوامر عن بعد غير متوفرة",
+		})
+	}
+
+	h.remoteCommandWorker.Trigger()
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": "تم إرسال إشارة فحص الأوامر السحابية فوراً",
+	})
+}
+
 // ---------------- CUSTOMER GRID CELL & REGIONS ----------------
 
 func (h *Handlers) UpdateGridCell(c *fiber.Ctx) error {
@@ -694,26 +749,32 @@ func (h *Handlers) ApprovePayment(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "message": "Payment approved"})
 }
 
-func (h *Handlers) RejectPayment(c *fiber.Ctx) error {
+func (h *Handlers) ReversePayment(c *fiber.Ctx) error {
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "Invalid ID"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "معرف السند غير صالح"})
 	}
+
 	var req struct {
 		Reason string `json:"reason"`
 	}
 	_ = c.BodyParser(&req)
+
 	auditCtx := h.getAuditContext(c)
-	if err := h.paymentService.RejectPayment(id, req.Reason, auditCtx); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": err.Error()})
+	if err := h.paymentService.ReversePayment(id, req.Reason, auditCtx); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
 
 	if h.eventHub != nil {
-		h.eventHub.Broadcast("PAYMENTS_CHANGED", map[string]interface{}{"id": id, "action": "REJECT"})
+		h.eventHub.Broadcast("PAYMENTS_CHANGED", map[string]interface{}{"id": id, "action": "REVERSE"})
 		h.eventHub.Broadcast("INVOICES_CHANGED", nil)
+		h.eventHub.Broadcast("CUSTOMERS_CHANGED", nil)
 	}
 
-	return c.JSON(fiber.Map{"success": true, "message": "Payment rejected"})
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": "تم إلغاء وعكس سند القبض وإعادة ضبط الحسابات بنجاح",
+	})
 }
 
 func (h *Handlers) SendPaymentWhatsApp(c *fiber.Ctx) error {
@@ -1916,6 +1977,13 @@ func (h *Handlers) DownloadUpdate(c *fiber.Ctx) error {
 		SHA256      string `json:"sha256"`
 	}
 	_ = c.BodyParser(&req)
+
+	if req.DownloadURL != "" && !strings.HasPrefix(strings.ToLower(req.DownloadURL), "https://") {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"message": "يجب أن يكون رابط التحديث عبر بروتوكول آمن مشفر (HTTPS)",
+		})
+	}
 
 	h.updateService.StartAsyncDownload(req.DownloadURL, req.SHA256)
 

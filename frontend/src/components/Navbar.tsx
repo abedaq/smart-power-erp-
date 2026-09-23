@@ -68,9 +68,6 @@ const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar, isSidebarCollapsed }) 
           <span className="text-xs font-bold text-slate-500">مرحباً بك،</span>
           <h2 className="text-base font-black text-slate-900">{user?.full_name || 'المستخدم'}</h2>
           {getRoleBadge(user?.role)}
-          <div className="hidden md:flex items-center gap-1.5 bg-gradient-to-r from-amber-500 via-orange-600 to-yellow-500 text-white px-2.5 py-1 rounded-xl text-xs font-black shadow-sm">
-            <span>🏆 الإصدار الذهبي المعتمد v{updateInfo?.current_version || '3.4.4.1'} - نظام التشخيص والدعم الذكي ⚡</span>
-          </div>
         </div>
       </div>
 

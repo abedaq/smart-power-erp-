@@ -474,14 +474,25 @@ export const StatementModal: React.FC<StatementModalProps> = ({
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {payments.map((p: any) => {
-                        const isApproved = (p.approval_status || 'APPROVED') === 'APPROVED';
+                        const status = (p.approval_status || 'APPROVED').toUpperCase();
+                        const isReversed = status === 'REVERSED';
+                        const isApproved = status === 'APPROVED';
                         return (
-                          <tr key={p.id} className="hover:bg-slate-50/80 transition-colors">
+                          <tr key={p.id} className={`hover:bg-slate-50/80 transition-colors ${isReversed ? 'bg-rose-50/30' : ''}`}>
                             <td className="px-4 py-3 font-mono font-bold text-slate-900">
-                              {p.receipt_number || `REC-${p.id}`}
+                              <div className="flex items-center gap-1.5">
+                                <span>{p.receipt_number || `REC-${p.id}`}</span>
+                                {isReversed && (
+                                  <span className="bg-rose-100 text-rose-700 text-[10px] px-1 py-0.2 rounded font-sans font-bold">
+                                    ملغي
+                                  </span>
+                                )}
+                              </div>
                             </td>
-                            <td className="px-4 py-3 font-mono font-bold text-emerald-700 text-sm">
-                              {Number(p.amount_paid).toLocaleString('en-US')} ر.ي
+                            <td className="px-4 py-3 font-mono font-bold text-sm">
+                              <span className={isReversed ? 'line-through text-slate-400' : 'text-emerald-700'}>
+                                {Number(p.amount_paid).toLocaleString('en-US')} ر.ي
+                              </span>
                             </td>
                             <td className="px-4 py-3 font-medium text-slate-900">
                               {p.accountant_name || 'أمين الصندوق'}
@@ -493,7 +504,12 @@ export const StatementModal: React.FC<StatementModalProps> = ({
                             <td className="px-4 py-3 font-mono text-[11px] text-slate-500">
                               {p.payment_date ? new Date(p.payment_date).toLocaleString('en-US') : (p.created_at ? new Date(p.created_at).toLocaleString('en-US') : '-')}
                             </td>
-                              <td className="px-4 py-3 text-center">
+                            <td className="px-4 py-3 text-center">
+                              {isReversed ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
+                                  ملغي ومسترجع
+                                </span>
+                              ) : (
                                 <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
                                   isApproved
                                     ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
@@ -501,7 +517,8 @@ export const StatementModal: React.FC<StatementModalProps> = ({
                                 }`}>
                                   {isApproved ? 'معتمد' : 'معلق (بانتظار الاعتماد)'}
                                 </span>
-                              </td>
+                              )}
+                            </td>
                           </tr>
                         );
                       })}
