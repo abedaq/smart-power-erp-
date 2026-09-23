@@ -100,9 +100,7 @@ o سعر الكيلوواط/ ساعة ${planPrice.toLocaleString('en-US')} ري�
       if (readingVal > prevVal) {
         return readingVal - prevVal;
       }
-      if (readingVal > 0) {
-        return readingVal;
-      }
+      return 0;
     }
 
     // 4. From customer's last_reading / currReading vs prevReading
@@ -110,9 +108,6 @@ o سعر الكيلوواط/ ساعة ${planPrice.toLocaleString('en-US')} ري�
     const prev = Number((customer as any).prevReading ?? customer.previous_reading ?? customer.initial_reading ?? 0);
     if (curr > prev) {
       return curr - prev;
-    }
-    if (curr > 0) {
-      return curr;
     }
 
     return 0;
@@ -550,13 +545,14 @@ o سعر الكيلوواط/ ساعة ${planPrice.toLocaleString('en-US')} ري�
                           )}
                         </div>
 
-                        {/* Table (7 Columns) */}
+                        {/* Table (8 Columns) */}
                         <table className="w-full border-collapse text-center text-[10px] border-2 border-black mb-2">
                           <thead>
                             <tr className="bg-white font-black border-b-2 border-black">
                               <th colSpan={2} className="border border-black py-1">قــــــراءة العداد</th>
                               <th rowSpan={2} className="border border-black py-1">الفارق</th>
                               <th rowSpan={2} className="border border-black py-1">اشتراك</th>
+                              <th rowSpan={2} className="border border-black py-1">متأخرات</th>
                               <th rowSpan={2} className="border border-black py-1">القيمـة</th>
                               <th rowSpan={2} className="border border-black py-1">المدفوع</th>
                               <th rowSpan={2} className="border border-black py-1">المتبقي</th>
@@ -572,6 +568,7 @@ o سعر الكيلوواط/ ساعة ${planPrice.toLocaleString('en-US')} ري�
                               <td className="border border-black py-1 font-mono">{Number(updatedComputedRow.currReading || 0) > 0 ? Number(updatedComputedRow.currReading).toLocaleString('en-US') : ''}</td>
                               <td className="border border-black py-1 font-mono">{Number(updatedComputedRow.units || 0) > 0 ? Number(updatedComputedRow.units).toLocaleString('en-US') : ''}</td>
                               <td className="border border-black py-1 font-mono">{Number(updatedComputedRow.serviceFee || 0) > 0 ? Number(updatedComputedRow.serviceFee).toLocaleString('en-US') : ''}</td>
+                              <td className="border border-black py-1 font-mono">{Number(updatedComputedRow.arrears || 0) > 0 ? Number(updatedComputedRow.arrears).toLocaleString('en-US') : ''}</td>
                               <td className="border border-black py-1 font-mono">{Number(updatedComputedRow.consumptionCost || 0) > 0 ? Number(updatedComputedRow.consumptionCost).toLocaleString('en-US') : ''}</td>
                               <td className="border border-black py-1 font-mono text-emerald-800 font-extrabold">{Number(updatedComputedRow.paidAmount || 0) > 0 ? Number(updatedComputedRow.paidAmount).toLocaleString('en-US') : ''}</td>
                               <td className={`border border-black py-1 font-mono font-extrabold ${updatedComputedRow.remaining < 0 ? 'text-emerald-800' : 'text-rose-800'}`}>

@@ -186,95 +186,17 @@ func (s *PaymentService) CreatePayment(req CreatePaymentRequest) (*PaymentResult
 				}
 			}
 
-			// 2. Apply payment to target invoice up to its remaining due
-			if remainingPaymentToAllocate > 0 {
-				targetRem := math.Max(0, targetInvoice.RemainingAmount)
-				allocAmount := math.Min(remainingPaymentToAllocate, targetRem)
-				if targetRem == 0 && targetInvoice.RemainingAmount <= 0 {
-					allocAmount = 0
-				}
-				if allocAmount > 0 {
-					remainingPaymentToAllocate -= allocAmount
-					targetInvoice.PaidAmount += allocAmount
-					targetInvoice.RemainingAmount = math.Round((targetInvoice.TotalDue - targetInvoice.PaidAmount) * 100) / 100
-					if targetInvoice.RemainingAmount <= 0 {
-						targetInvoice.Status = "Paid"
-					} else {
-						targetInvoice.Status = "Partially_Paid"
-					}
-					_ = tx.Save(targetInvoice)
-
-					alloc := models.PaymentAllocation{
-						PaymentID:       payment.ID,
-						InvoiceID:       targetInvoice.ID,
-						AmountAllocated: allocAmount,
-						CreatedAt:       &now,
-					}
-					_ = tx.Create(&alloc)
-					allocations = append(allocations, alloc)
-				}
-			}
-
-			// 3. Apply any remaining payment to subsequent unpaid invoices (FIFO)
-			if remainingPaymentToAllocate > 0 {
-				var subsequentInvoices []models.Invoice
-				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-					Where("customer_id = ? AND id != ? AND approval_status != 'REJECTED' AND remaining_amount > 0 AND status IN ('Unpaid', 'Partially_Paid')", customer.ID, targetInvoice.ID).
-					Find(&subsequentInvoices).Error; err == nil {
-
-					targetIdx := 0
-					if targetInvoice.BillingCycle != nil {
-						targetIdx = GetCycleSortIndex(*targetInvoice.BillingCycle)
-					}
-					var filteredSubsequent []models.Invoice
-					for _, inv := range subsequentInvoices {
-						invCycle := ""
-						if inv.BillingCycle != nil {
-							invCycle = *inv.BillingCycle
-						}
-						invIdx := GetCycleSortIndex(invCycle)
-						if invIdx > targetIdx || (invIdx == targetIdx && inv.ID > targetInvoice.ID) {
-							filteredSubsequent = append(filteredSubsequent, inv)
-						}
-					}
-					sort.Slice(filteredSubsequent, func(i, j int) bool {
-						return filteredSubsequent[i].ID < filteredSubsequent[j].ID
-					})
-
-					for j := range filteredSubsequent {
-						if remainingPaymentToAllocate <= 0 {
-							break
-						}
-						subAlloc := math.Min(remainingPaymentToAllocate, filteredSubsequent[j].RemainingAmount)
-						remainingPaymentToAllocate -= subAlloc
-						filteredSubsequent[j].PaidAmount += subAlloc
-						filteredSubsequent[j].RemainingAmount = math.Round((filteredSubsequent[j].TotalDue - filteredSubsequent[j].PaidAmount) * 100) / 100
-						if filteredSubsequent[j].RemainingAmount <= 0 {
-							filteredSubsequent[j].Status = "Paid"
-						} else {
-							filteredSubsequent[j].Status = "Partially_Paid"
-						}
-						_ = tx.Save(&filteredSubsequent[j])
-
-						alloc := models.PaymentAllocation{
-							PaymentID:       payment.ID,
-							InvoiceID:       filteredSubsequent[j].ID,
-							AmountAllocated: subAlloc,
-							CreatedAt:       &now,
-						}
-						_ = tx.Create(&alloc)
-						allocations = append(allocations, alloc)
-					}
-				}
-			}
-
-			// 4. If all invoices are paid and surplus remains, dump remaining onto target invoice
+			// 2. Apply remaining payment directly to target invoice (preserving exact paid amount & negative balance)
 			if remainingPaymentToAllocate > 0 {
 				allocAmount := remainingPaymentToAllocate
 				remainingPaymentToAllocate = 0
 				targetInvoice.PaidAmount += allocAmount
 				targetInvoice.RemainingAmount = math.Round((targetInvoice.TotalDue - targetInvoice.PaidAmount) * 100) / 100
-				targetInvoice.Status = "Paid"
+				if targetInvoice.RemainingAmount <= 0 {
+					targetInvoice.Status = "Paid"
+				} else {
+					targetInvoice.Status = "Partially_Paid"
+				}
 				_ = tx.Save(targetInvoice)
 
 				alloc := models.PaymentAllocation{
