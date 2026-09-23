@@ -128,6 +128,9 @@ func (s *BillingService) EnsureCycleInvoices(cycle string) error {
 	}
 	aliases := getCycleAliases(primaryCycleName)
 
+	// تمديد المهلة الزمنية للفوترة المجمعة لضمان إتمام كافة المشتركين دون انقطاع
+	_ = s.db.Exec("SET LOCAL statement_timeout = '300s'").Error
+
 	var activeCustomers []models.Customer
 	if err := s.db.Preload("SubscriptionPlan").
 		Where("is_deleted = false AND status = 'Active'").

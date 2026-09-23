@@ -98,6 +98,8 @@ const AppContent: React.FC = () => {
   );
 };
 
+import { RealtimeProvider } from './context/RealtimeContext';
+
 const App: React.FC = () => {
   useEffect(() => {
     // Engine initialization
@@ -107,7 +109,9 @@ const App: React.FC = () => {
     <LicenseProvider>
       <AuthProvider>
         <UpdateProvider>
-          <AppContent />
+          <RealtimeProvider>
+            <AppContent />
+          </RealtimeProvider>
         </UpdateProvider>
       </AuthProvider>
     </LicenseProvider>

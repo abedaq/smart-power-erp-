@@ -48,6 +48,10 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
+	// تعيين المهل الزمنية الافتراضية لمنع استنزاف مجمع الاتصالات
+	_ = db.Exec("SET statement_timeout = '20s';").Error
+	_ = db.Exec("SET lock_timeout = '8s';").Error
+
 	// Auto-ensure required schema tables & columns exist cleanly without constraint drops
 	if !db.Migrator().HasTable(&models.WhatsAppQueueMessage{}) {
 		_ = db.AutoMigrate(&models.WhatsAppQueueMessage{})

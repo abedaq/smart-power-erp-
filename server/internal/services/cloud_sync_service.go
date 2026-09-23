@@ -39,6 +39,118 @@ type CloudSyncService struct {
 	status      SyncStatus
 }
 
+// Data Transfer Objects for Atomic RPC Payload
+type PlanDTO struct {
+	PlanName        string    `json:"plan_name"`
+	KwhPrice        float64   `json:"kwh_price"`
+	FixedFee        float64   `json:"fixed_fee"`
+	GracePeriodDays int       `json:"grace_period_days"`
+	Description     *string   `json:"description,omitempty"`
+	IsActive        bool      `json:"is_active"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+type CustomerDTO struct {
+	SubscriberNumber string    `json:"subscriber_number"`
+	FullName         string    `json:"full_name"`
+	PhoneNumber      string    `json:"phone_number"`
+	IdCardURL        *string   `json:"id_card_url,omitempty"`
+	Address          *string   `json:"address,omitempty"`
+	MeterNumber      *string   `json:"meter_number,omitempty"`
+	RouteNumber      *string   `json:"route_number,omitempty"`
+	PlanName         *string   `json:"plan_name,omitempty"`
+	InitialReading   float64   `json:"initial_reading"`
+	StartCycle       string    `json:"start_cycle"`
+	Status           string    `json:"status"`
+	SortOrder        int       `json:"sort_order"`
+	IsDeleted        bool      `json:"is_deleted"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+type ReadingDTO struct {
+	SubscriberNumber string    `json:"subscriber_number"`
+	ReadingValue     float64   `json:"reading_value"`
+	ReadingDate      time.Time `json:"reading_date"`
+	CollectorName    string    `json:"collector_name"`
+	ApprovalStatus   string    `json:"approval_status"`
+	ClientMutationID *string   `json:"client_mutation_id,omitempty"`
+	WhatsAppSent     bool      `json:"whatsapp_sent"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+type InvoiceDTO struct {
+	SubscriberNumber string    `json:"subscriber_number"`
+	InvoiceNumber    string    `json:"invoice_number"`
+	PreviousReading  float64   `json:"previous_reading"`
+	CurrentReading   float64   `json:"current_reading"`
+	Consumption      float64   `json:"consumption"`
+	ConsumptionValue float64   `json:"consumption_value"`
+	KwhPriceSnapshot float64   `json:"kwh_price_snapshot"`
+	FixedFeeSnapshot float64   `json:"fixed_fee_snapshot"`
+	Arrears          float64   `json:"arrears"`
+	TotalDue         float64   `json:"total_due"`
+	PaidAmount       float64   `json:"paid_amount"`
+	RemainingAmount  float64   `json:"remaining_amount"`
+	BillingCycle     *string   `json:"billing_cycle,omitempty"`
+	TotalAmount      float64   `json:"total_amount"`
+	DueDate          string    `json:"due_date"`
+	ApprovalStatus   string    `json:"approval_status"`
+	Status           string    `json:"status"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+type PaymentDTO struct {
+	SubscriberNumber string    `json:"subscriber_number"`
+	InvoiceNumber    *string   `json:"invoice_number,omitempty"`
+	ReceiptNumber    string    `json:"receipt_number"`
+	PaymentMethod    string    `json:"payment_method"`
+	AmountPaid       float64   `json:"amount_paid"`
+	PaymentDate      time.Time `json:"payment_date"`
+	AccountantName   string    `json:"accountant_name"`
+	ApprovalStatus   string    `json:"approval_status"`
+	Notes            *string   `json:"notes,omitempty"`
+	ClientMutationID *string   `json:"client_mutation_id,omitempty"`
+	WhatsAppSent     bool      `json:"whatsapp_sent"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+type AllocationDTO struct {
+	ReceiptNumber   string    `json:"receipt_number"`
+	InvoiceNumber   string    `json:"invoice_number"`
+	AmountAllocated float64   `json:"amount_allocated"`
+	IsReversed      bool      `json:"is_reversed"`
+	ReversedAt      *time.Time `json:"reversed_at,omitempty"`
+	ReversalReason  *string   `json:"reversal_reason,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+type SyncStationPayload struct {
+	SubscriptionPlans []PlanDTO       `json:"subscription_plans"`
+	Customers         []CustomerDTO   `json:"customers"`
+	MeterReadings     []ReadingDTO    `json:"meter_readings"`
+	Invoices          []InvoiceDTO    `json:"invoices"`
+	Payments          []PaymentDTO    `json:"payments"`
+	Allocations       []AllocationDTO `json:"payment_allocations"`
+}
+
+type OutboxRow struct {
+	ID         int64           `gorm:"column:id;primaryKey"`
+	Table      string          `gorm:"column:table_name"`
+	RecordID   int64           `gorm:"column:record_id"`
+	NaturalKey *string         `gorm:"column:natural_key"`
+	Operation  string          `gorm:"column:operation"`
+	Payload    json.RawMessage `gorm:"column:payload"`
+	Status     string          `gorm:"column:status"`
+	Attempts   int             `gorm:"column:attempts"`
+	LastError  *string         `gorm:"column:last_error"`
+	CreatedAt  time.Time       `gorm:"column:created_at"`
+	SyncedAt   *time.Time      `gorm:"column:synced_at"`
+}
+
+func (OutboxRow) TableName() string {
+	return "sync_outbox"
+}
+
 func NewCloudSyncService(db *gorm.DB, cfg *config.Config) *CloudSyncService {
 	supaURL := ""
 	anonKey := ""
@@ -65,7 +177,7 @@ func NewCloudSyncService(db *gorm.DB, cfg *config.Config) *CloudSyncService {
 		supabaseURL: supaURL,
 		anonKey:     anonKey,
 		httpClient: &http.Client{
-			Timeout: 15 * time.Second,
+			Timeout: 20 * time.Second,
 		},
 		triggerChan: make(chan struct{}, 10),
 		stopChan:    make(chan struct{}),
@@ -82,12 +194,13 @@ func (s *CloudSyncService) initSyncTables() {
 	if s.db == nil {
 		return
 	}
-	// Create Outbox Table for granular event captures
+
 	createOutboxSQL := `
-		CREATE TABLE IF NOT EXISTS sync_outbox (
+		CREATE TABLE IF NOT EXISTS public.sync_outbox (
 			id BIGSERIAL PRIMARY KEY,
 			table_name VARCHAR(50) NOT NULL,
 			record_id BIGINT NOT NULL,
+			natural_key VARCHAR(100),
 			operation VARCHAR(10) NOT NULL,
 			payload JSONB NOT NULL,
 			status VARCHAR(20) DEFAULT 'PENDING',
@@ -96,20 +209,105 @@ func (s *CloudSyncService) initSyncTables() {
 			created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
 			synced_at TIMESTAMPTZ
 		);
-		CREATE INDEX IF NOT EXISTS idx_sync_outbox_pending ON sync_outbox(status, id);
+		CREATE INDEX IF NOT EXISTS idx_sync_outbox_pending_v2 ON public.sync_outbox(status, id ASC);
+		CREATE INDEX IF NOT EXISTS idx_sync_outbox_table_rec ON public.sync_outbox(table_name, record_id);
 
-		CREATE TABLE IF NOT EXISTS sync_checkpoints (
-			table_name VARCHAR(50) PRIMARY KEY,
-			last_synced_id BIGINT DEFAULT 0,
-			last_synced_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-		);
+		CREATE OR REPLACE FUNCTION public.fn_capture_sync_outbox()
+		RETURNS TRIGGER
+		LANGUAGE plpgsql
+		AS $$
+		DECLARE
+			v_table_name VARCHAR(50);
+			v_record_id BIGINT;
+			v_natural_key VARCHAR(100) := NULL;
+			v_operation VARCHAR(10);
+			v_payload JSONB;
+		BEGIN
+			v_table_name := TG_TABLE_NAME;
+			v_operation := TG_OP;
+
+			IF TG_OP = 'DELETE' THEN
+				v_record_id := OLD.id;
+				v_payload := to_jsonb(OLD);
+				
+				IF v_table_name = 'customers' THEN
+					v_natural_key := OLD.subscriber_number;
+				ELSIF v_table_name = 'invoices' THEN
+					v_natural_key := OLD.invoice_number;
+				ELSIF v_table_name = 'payments' THEN
+					v_natural_key := OLD.receipt_number;
+				ELSIF v_table_name = 'meter_readings' THEN
+					v_natural_key := COALESCE(OLD.client_mutation_id::TEXT, OLD.id::TEXT);
+				ELSIF v_table_name = 'subscription_plans' THEN
+					v_natural_key := OLD.plan_name;
+				END IF;
+			ELSE
+				v_record_id := NEW.id;
+				v_payload := to_jsonb(NEW);
+
+				IF v_table_name = 'customers' THEN
+					v_natural_key := NEW.subscriber_number;
+				ELSIF v_table_name = 'invoices' THEN
+					v_natural_key := NEW.invoice_number;
+				ELSIF v_table_name = 'payments' THEN
+					v_natural_key := NEW.receipt_number;
+				ELSIF v_table_name = 'meter_readings' THEN
+					v_natural_key := COALESCE(NEW.client_mutation_id::TEXT, NEW.id::TEXT);
+				ELSIF v_table_name = 'subscription_plans' THEN
+					v_natural_key := NEW.plan_name;
+				END IF;
+			END IF;
+
+			INSERT INTO public.sync_outbox (
+				table_name,
+				record_id,
+				natural_key,
+				operation,
+				payload,
+				status,
+				created_at
+			) VALUES (
+				v_table_name,
+				v_record_id,
+				v_natural_key,
+				v_operation,
+				v_payload,
+				'PENDING',
+				CURRENT_TIMESTAMP
+			);
+
+			IF TG_OP = 'DELETE' THEN
+				RETURN OLD;
+			ELSE
+				RETURN NEW;
+			END IF;
+		END;
+		$$;
+
+		DROP TRIGGER IF EXISTS trg_sync_outbox_customers ON public.customers;
+		CREATE TRIGGER trg_sync_outbox_customers AFTER INSERT OR UPDATE OR DELETE ON public.customers FOR EACH ROW EXECUTE FUNCTION public.fn_capture_sync_outbox();
+
+		DROP TRIGGER IF EXISTS trg_sync_outbox_subscription_plans ON public.subscription_plans;
+		CREATE TRIGGER trg_sync_outbox_subscription_plans AFTER INSERT OR UPDATE OR DELETE ON public.subscription_plans FOR EACH ROW EXECUTE FUNCTION public.fn_capture_sync_outbox();
+
+		DROP TRIGGER IF EXISTS trg_sync_outbox_meter_readings ON public.meter_readings;
+		CREATE TRIGGER trg_sync_outbox_meter_readings AFTER INSERT OR UPDATE OR DELETE ON public.meter_readings FOR EACH ROW EXECUTE FUNCTION public.fn_capture_sync_outbox();
+
+		DROP TRIGGER IF EXISTS trg_sync_outbox_invoices ON public.invoices;
+		CREATE TRIGGER trg_sync_outbox_invoices AFTER INSERT OR UPDATE OR DELETE ON public.invoices FOR EACH ROW EXECUTE FUNCTION public.fn_capture_sync_outbox();
+
+		DROP TRIGGER IF EXISTS trg_sync_outbox_payments ON public.payments;
+		CREATE TRIGGER trg_sync_outbox_payments AFTER INSERT OR UPDATE OR DELETE ON public.payments FOR EACH ROW EXECUTE FUNCTION public.fn_capture_sync_outbox();
+
+		DROP TRIGGER IF EXISTS trg_sync_outbox_payment_allocations ON public.payment_allocations;
+		CREATE TRIGGER trg_sync_outbox_payment_allocations AFTER INSERT OR UPDATE OR DELETE ON public.payment_allocations FOR EACH ROW EXECUTE FUNCTION public.fn_capture_sync_outbox();
 	`
 	_ = s.db.Exec(createOutboxSQL)
 }
 
 func (s *CloudSyncService) Start() {
 	go s.workerLoop()
-	log.Println("☁️ Cloud Sync Engine initialized (Store-and-Forward Row Replication)")
+	log.Println("☁️ Cloud Sync Engine initialized (Zero-Conflict Atomic Outbox & Natural Keys)")
 }
 
 func (s *CloudSyncService) Stop() {
@@ -127,7 +325,14 @@ func (s *CloudSyncService) TriggerSync() {
 func (s *CloudSyncService) GetStatus() SyncStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.status
+
+	var pendingCount int64
+	if s.db != nil {
+		_ = s.db.Model(&OutboxRow{}).Where("status = ?", "PENDING").Count(&pendingCount).Error
+	}
+	currentStatus := s.status
+	currentStatus.PendingCount = pendingCount
+	return currentStatus
 }
 
 func (s *CloudSyncService) checkOnline() bool {
@@ -153,6 +358,9 @@ func (s *CloudSyncService) workerLoop() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
+	cleanupTicker := time.NewTicker(24 * time.Hour)
+	defer cleanupTicker.Stop()
+
 	// Initial sync on startup after 3 seconds
 	time.Sleep(3 * time.Second)
 	s.runFullSyncCycle()
@@ -165,6 +373,8 @@ func (s *CloudSyncService) workerLoop() {
 			s.runFullSyncCycle()
 		case <-ticker.C:
 			s.runFullSyncCycle()
+		case <-cleanupTicker.C:
+			s.cleanupOldOutbox()
 		}
 	}
 }
@@ -193,404 +403,355 @@ func (s *CloudSyncService) runFullSyncCycle() {
 		return
 	}
 
-	totalSynced := 0
-
-	// Sync in strict Foreign-Key Dependency Order:
-	// 1. Subscription Plans
-	if n, err := s.syncSubscriptionPlans(); err != nil {
-		log.Printf("⚠️ [CloudSync] Error syncing subscription plans: %v", err)
-	} else {
-		totalSynced += n
-	}
-	// 2. Customers
-	if n, err := s.syncCustomers(); err != nil {
-		log.Printf("⚠️ [CloudSync] Error syncing customers: %v", err)
-	} else {
-		totalSynced += n
-	}
-	// 3. Meter Readings
-	if n, err := s.syncMeterReadings(); err != nil {
-		log.Printf("⚠️ [CloudSync] Error syncing meter readings: %v", err)
-	} else {
-		totalSynced += n
-	}
-	// 4. Invoices
-	if n, err := s.syncInvoices(); err != nil {
-		log.Printf("⚠️ [CloudSync] Error syncing invoices: %v", err)
-	} else {
-		totalSynced += n
-	}
-	// 5. Payments
-	if n, err := s.syncPayments(); err != nil {
-		log.Printf("⚠️ [CloudSync] Error syncing payments: %v", err)
-	} else {
-		totalSynced += n
+	// 1. Process Outbox Events (Primary Zero-Conflict Stream)
+	syncedOutbox, err := s.processOutboxBatch(200)
+	if err != nil {
+		log.Printf("⚠️ [CloudSync] Error processing outbox batch: %v", err)
+		s.mu.Lock()
+		s.status.LastError = err.Error()
+		s.mu.Unlock()
 	}
 
-	// 6. Process custom outbox events
-	if n, err := s.processOutboxEvents(); err != nil {
-		log.Printf("⚠️ [CloudSync] Error processing outbox events: %v", err)
-	} else {
-		totalSynced += n
+	// 2. If Outbox has 0 pending items, do historical baseline reconciliation
+	if syncedOutbox == 0 {
+		var pendingCount int64
+		_ = s.db.Model(&OutboxRow{}).Where("status = ?", "PENDING").Count(&pendingCount).Error
+		if pendingCount == 0 {
+			if n, err := s.reconcileHistoricalData(); err != nil {
+				log.Printf("⚠️ [CloudSync] Historical reconciliation error: %v", err)
+			} else if n > 0 {
+				syncedOutbox += n
+			}
+		}
 	}
 
-	s.mu.Lock()
-	if totalSynced > 0 {
-		s.status.TotalSyncedRows += int64(totalSynced)
+	if syncedOutbox > 0 {
+		s.mu.Lock()
+		s.status.TotalSyncedRows += int64(syncedOutbox)
 		s.status.LastSyncTime = time.Now()
 		s.status.LastError = ""
-		log.Printf("☁️ [CloudSync] Successfully synced %d SQL rows to Supabase", totalSynced)
+		s.mu.Unlock()
+		log.Printf("☁️ [CloudSync] Successfully synced %d entities atomically to Supabase", syncedOutbox)
 	}
-	s.mu.Unlock()
 }
 
-func (s *CloudSyncService) getLastSyncedID(table string) int64 {
-	var lastID int64
-	_ = s.db.Table("sync_checkpoints").Where("table_name = ?", table).Pluck("last_synced_id", &lastID)
-	return lastID
-}
+func (s *CloudSyncService) callSupabaseRPC(functionName string, payload interface{}) (map[string]interface{}, error) {
+	reqBody := map[string]interface{}{
+		"p_payload": payload,
+	}
 
-func (s *CloudSyncService) setLastSyncedID(table string, lastID int64) {
-	sql := `
-		INSERT INTO sync_checkpoints (table_name, last_synced_id, last_synced_at)
-		VALUES (?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT (table_name) DO UPDATE 
-		SET last_synced_id = GREATEST(sync_checkpoints.last_synced_id, EXCLUDED.last_synced_id),
-		    last_synced_at = CURRENT_TIMESTAMP;
-	`
-	_ = s.db.Exec(sql, table, lastID)
-}
-
-func (s *CloudSyncService) postgrestUpsert(table string, payload interface{}) error {
-	bodyBytes, err := json.Marshal(payload)
+	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return fmt.Errorf("marshal error: %w", err)
+		return nil, fmt.Errorf("marshal RPC error: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/rest/v1/%s?on_conflict=id", s.supabaseURL, table)
+	url := fmt.Sprintf("%s/rest/v1/rpc/%s", s.supabaseURL, functionName)
 	req, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return fmt.Errorf("create request error: %w", err)
+		return nil, fmt.Errorf("create RPC request error: %w", err)
 	}
 
 	req.Header.Set("apikey", s.anonKey)
 	req.Header.Set("Authorization", "Bearer "+s.anonKey)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Prefer", "resolution=merge-duplicates,return=minimal")
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("http execute error: %w", err)
+		return nil, fmt.Errorf("execute RPC error: %w", err)
 	}
 	defer resp.Body.Close()
 
+	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("supabase returned %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("Supabase RPC returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return nil
+	var result map[string]interface{}
+	_ = json.Unmarshal(respBody, &result)
+	return result, nil
 }
 
-// 1. Sync Subscription Plans
-func (s *CloudSyncService) syncSubscriptionPlans() (int, error) {
-	var plans []models.SubscriptionPlan
-	if err := s.db.Find(&plans).Error; err != nil || len(plans) == 0 {
-		return 0, err
+func (s *CloudSyncService) processOutboxBatch(batchSize int) (int, error) {
+	var rows []OutboxRow
+	if err := s.db.Where("status = ?", "PENDING").Order("id ASC").Limit(batchSize).Find(&rows).Error; err != nil || len(rows) == 0 {
+		return 0, nil
 	}
 
-	type planDTO struct {
-		ID              int64     `json:"id"`
-		PlanName        string    `json:"plan_name"`
-		KwhPrice        float64   `json:"kwh_price"`
-		FixedFee        float64   `json:"fixed_fee"`
-		GracePeriodDays int       `json:"grace_period_days"`
-		CreatedAt       time.Time `json:"created_at"`
+	payload := SyncStationPayload{
+		SubscriptionPlans: make([]PlanDTO, 0),
+		Customers:         make([]CustomerDTO, 0),
+		MeterReadings:     make([]ReadingDTO, 0),
+		Invoices:          make([]InvoiceDTO, 0),
+		Payments:          make([]PaymentDTO, 0),
+		Allocations:       make([]AllocationDTO, 0),
 	}
 
-	var dtos []planDTO
-	for _, p := range plans {
-		createdAt := time.Now()
-		if p.CreatedAt != nil {
-			createdAt = *p.CreatedAt
+	var rowIDs []int64
+
+	for _, r := range rows {
+		rowIDs = append(rowIDs, r.ID)
+
+		switch r.Table {
+		case "subscription_plans":
+			var p models.SubscriptionPlan
+			if err := json.Unmarshal(r.Payload, &p); err == nil {
+				createdAt := time.Now()
+				if p.CreatedAt != nil {
+					createdAt = *p.CreatedAt
+				}
+				payload.SubscriptionPlans = append(payload.SubscriptionPlans, PlanDTO{
+					PlanName:        p.PlanName,
+					KwhPrice:        p.KwhPrice,
+					FixedFee:        p.FixedFee,
+					GracePeriodDays: p.GracePeriodDays,
+					Description:     p.Description,
+					IsActive:        p.IsActive,
+					CreatedAt:       createdAt,
+				})
+			}
+		case "customers":
+			var c models.Customer
+			if err := json.Unmarshal(r.Payload, &c); err == nil {
+				var planName *string
+				if c.SubscriptionPlanID != nil {
+					var plan models.SubscriptionPlan
+					if err := s.db.First(&plan, *c.SubscriptionPlanID).Error; err == nil {
+						planName = &plan.PlanName
+					}
+				}
+				createdAt := time.Now()
+				if c.CreatedAt != nil {
+					createdAt = *c.CreatedAt
+				}
+				payload.Customers = append(payload.Customers, CustomerDTO{
+					SubscriberNumber: c.SubscriberNumber,
+					FullName:         c.FullName,
+					PhoneNumber:      c.PhoneNumber,
+					IdCardURL:        c.IdCardURL,
+					Address:          c.Address,
+					MeterNumber:      c.MeterNumber,
+					RouteNumber:      c.RouteNumber,
+					PlanName:         planName,
+					InitialReading:   c.InitialReading,
+					StartCycle:       c.StartCycle,
+					Status:           c.Status,
+					SortOrder:        c.SortOrder,
+					IsDeleted:        c.IsDeleted,
+					CreatedAt:        createdAt,
+				})
+			}
+		case "meter_readings":
+			var m models.MeterReading
+			if err := json.Unmarshal(r.Payload, &m); err == nil {
+				var subNum string
+				if m.CustomerID != nil {
+					_ = s.db.Table("customers").Where("id = ?", *m.CustomerID).Pluck("subscriber_number", &subNum)
+				}
+				if subNum != "" {
+					readingDate := time.Now()
+					if m.ReadingDate != nil {
+						readingDate = *m.ReadingDate
+					}
+					createdAt := time.Now()
+					if m.CreatedAt != nil {
+						createdAt = *m.CreatedAt
+					}
+					payload.MeterReadings = append(payload.MeterReadings, ReadingDTO{
+						SubscriberNumber: subNum,
+						ReadingValue:     m.ReadingValue,
+						ReadingDate:      readingDate,
+						CollectorName:    m.CollectorName,
+						ApprovalStatus:   m.ApprovalStatus,
+						ClientMutationID: m.ClientMutationID,
+						WhatsAppSent:     m.WhatsAppSent,
+						CreatedAt:        createdAt,
+					})
+				}
+			}
+		case "invoices":
+			var inv models.Invoice
+			if err := json.Unmarshal(r.Payload, &inv); err == nil {
+				var subNum string
+				if inv.CustomerID != nil {
+					_ = s.db.Table("customers").Where("id = ?", *inv.CustomerID).Pluck("subscriber_number", &subNum)
+				}
+				invNum := ""
+				if inv.InvoiceNumber != nil {
+					invNum = *inv.InvoiceNumber
+				}
+				if invNum != "" && subNum != "" {
+					createdAt := time.Now()
+					if inv.CreatedAt != nil {
+						createdAt = *inv.CreatedAt
+					}
+					payload.Invoices = append(payload.Invoices, InvoiceDTO{
+						SubscriberNumber: subNum,
+						InvoiceNumber:    invNum,
+						PreviousReading:  inv.PreviousReading,
+						CurrentReading:   inv.CurrentReading,
+						Consumption:      inv.Consumption,
+						ConsumptionValue: inv.ConsumptionValue,
+						KwhPriceSnapshot: inv.KwhPriceSnapshot,
+						FixedFeeSnapshot: inv.FixedFeeSnapshot,
+						Arrears:          inv.Arrears,
+						TotalDue:         inv.TotalDue,
+						PaidAmount:       inv.PaidAmount,
+						RemainingAmount:  inv.RemainingAmount,
+						BillingCycle:     inv.BillingCycle,
+						TotalAmount:      inv.TotalAmount,
+						DueDate:          inv.DueDate.Format("2006-01-02"),
+						ApprovalStatus:   inv.ApprovalStatus,
+						Status:           inv.Status,
+						CreatedAt:        createdAt,
+					})
+				}
+			}
+		case "payments":
+			var p models.Payment
+			if err := json.Unmarshal(r.Payload, &p); err == nil {
+				var subNum string
+				if p.CustomerID != nil {
+					_ = s.db.Table("customers").Where("id = ?", *p.CustomerID).Pluck("subscriber_number", &subNum)
+				}
+				var invNum *string
+				if p.InvoiceID != nil {
+					var foundInv models.Invoice
+					if err := s.db.First(&foundInv, *p.InvoiceID).Error; err == nil {
+						invNum = foundInv.InvoiceNumber
+					}
+				}
+				receiptNum := ""
+				if p.ReceiptNumber != nil {
+					receiptNum = *p.ReceiptNumber
+				}
+				if receiptNum != "" && subNum != "" {
+					paymentDate := time.Now()
+					if p.PaymentDate != nil {
+						paymentDate = *p.PaymentDate
+					}
+					createdAt := time.Now()
+					if p.CreatedAt != nil {
+						createdAt = *p.CreatedAt
+					}
+					payload.Payments = append(payload.Payments, PaymentDTO{
+						SubscriberNumber: subNum,
+						InvoiceNumber:    invNum,
+						ReceiptNumber:    receiptNum,
+						PaymentMethod:    p.PaymentMethod,
+						AmountPaid:       p.AmountPaid,
+						PaymentDate:      paymentDate,
+						AccountantName:   p.AccountantName,
+						ApprovalStatus:   p.ApprovalStatus,
+						Notes:            p.Notes,
+						ClientMutationID: p.ClientMutationID,
+						WhatsAppSent:     p.WhatsAppSent,
+						CreatedAt:        createdAt,
+					})
+				}
+			}
+		case "payment_allocations":
+			var alloc models.PaymentAllocation
+			if err := json.Unmarshal(r.Payload, &alloc); err == nil {
+				var receiptNum string
+				_ = s.db.Table("payments").Where("id = ?", alloc.PaymentID).Pluck("receipt_number", &receiptNum)
+				var invNum string
+				_ = s.db.Table("invoices").Where("id = ?", alloc.InvoiceID).Pluck("invoice_number", &invNum)
+
+				if receiptNum != "" && invNum != "" {
+					createdAt := time.Now()
+					if alloc.CreatedAt != nil {
+						createdAt = *alloc.CreatedAt
+					}
+					payload.Allocations = append(payload.Allocations, AllocationDTO{
+						ReceiptNumber:   receiptNum,
+						InvoiceNumber:   invNum,
+						AmountAllocated: alloc.AmountAllocated,
+						IsReversed:      alloc.IsReversed,
+						ReversedAt:      alloc.ReversedAt,
+						ReversalReason:  alloc.ReversalReason,
+						CreatedAt:       createdAt,
+					})
+				}
+			}
 		}
-		dtos = append(dtos, planDTO{
-			ID:              p.ID,
-			PlanName:        p.PlanName,
-			KwhPrice:        p.KwhPrice,
-			FixedFee:        p.FixedFee,
-			GracePeriodDays: p.GracePeriodDays,
-			CreatedAt:       createdAt,
-		})
 	}
 
-	if err := s.postgrestUpsert("subscription_plans", dtos); err != nil {
+	_, err := s.callSupabaseRPC("sync_station_payload", payload)
+	if err != nil {
+		_ = s.db.Model(&OutboxRow{}).Where("id IN ?", rowIDs).Updates(map[string]interface{}{
+			"attempts":   gorm.Expr("attempts + 1"),
+			"last_error": err.Error(),
+		}).Error
 		return 0, err
 	}
-	return len(dtos), nil
+
+	now := time.Now()
+	_ = s.db.Model(&OutboxRow{}).Where("id IN ?", rowIDs).Updates(map[string]interface{}{
+		"status":    "SYNCED",
+		"synced_at": now,
+	}).Error
+
+	return len(rows), nil
 }
 
-// 2. Sync Customers
-func (s *CloudSyncService) syncCustomers() (int, error) {
-	lastID := s.getLastSyncedID("customers")
+func (s *CloudSyncService) reconcileHistoricalData() (int, error) {
+	// Baseline snapshot query if sync_outbox is currently empty
 	var customers []models.Customer
-	if err := s.db.Where("id > ?", lastID).Order("id ASC").Limit(100).Find(&customers).Error; err != nil || len(customers) == 0 {
-		return 0, err
+	if err := s.db.Limit(50).Find(&customers).Error; err != nil || len(customers) == 0 {
+		return 0, nil
 	}
 
-	type customerDTO struct {
-		ID                 int64     `json:"id"`
-		SubscriberNumber   string    `json:"subscriber_number"`
-		FullName           string    `json:"full_name"`
-		PhoneNumber        string    `json:"phone_number"`
-		IdCardURL          *string   `json:"id_card_url,omitempty"`
-		Address            *string   `json:"address,omitempty"`
-		MeterNumber        *string   `json:"meter_number,omitempty"`
-		RouteNumber        *string   `json:"route_number,omitempty"`
-		SubscriptionPlanID *int64    `json:"subscription_plan_id,omitempty"`
-		InitialReading     float64   `json:"initial_reading"`
-		Status             string    `json:"status"`
-		IsDeleted          bool      `json:"is_deleted"`
-		CreatedAt          time.Time `json:"created_at"`
+	payload := SyncStationPayload{
+		SubscriptionPlans: make([]PlanDTO, 0),
+		Customers:         make([]CustomerDTO, 0),
+		MeterReadings:     make([]ReadingDTO, 0),
+		Invoices:          make([]InvoiceDTO, 0),
+		Payments:          make([]PaymentDTO, 0),
+		Allocations:       make([]AllocationDTO, 0),
 	}
 
-	var dtos []customerDTO
-	var maxID int64
 	for _, c := range customers {
-		if c.ID > maxID {
-			maxID = c.ID
+		var planName *string
+		if c.SubscriptionPlanID != nil {
+			var plan models.SubscriptionPlan
+			if err := s.db.First(&plan, *c.SubscriptionPlanID).Error; err == nil {
+				planName = &plan.PlanName
+			}
 		}
 		createdAt := time.Now()
 		if c.CreatedAt != nil {
 			createdAt = *c.CreatedAt
 		}
-		dtos = append(dtos, customerDTO{
-			ID:                 c.ID,
-			SubscriberNumber:   c.SubscriberNumber,
-			FullName:           c.FullName,
-			PhoneNumber:        c.PhoneNumber,
-			IdCardURL:          c.IdCardURL,
-			Address:            c.Address,
-			MeterNumber:        c.MeterNumber,
-			RouteNumber:        c.RouteNumber,
-			SubscriptionPlanID: c.SubscriptionPlanID,
-			InitialReading:     c.InitialReading,
-			Status:             c.Status,
-			IsDeleted:          c.IsDeleted,
-			CreatedAt:          createdAt,
-		})
-	}
-
-	if err := s.postgrestUpsert("customers", dtos); err != nil {
-		return 0, err
-	}
-	s.setLastSyncedID("customers", maxID)
-	return len(dtos), nil
-}
-
-// 3. Sync Meter Readings
-func (s *CloudSyncService) syncMeterReadings() (int, error) {
-	lastID := s.getLastSyncedID("meter_readings")
-	var readings []models.MeterReading
-	if err := s.db.Where("id > ?", lastID).Order("id ASC").Limit(100).Find(&readings).Error; err != nil || len(readings) == 0 {
-		return 0, err
-	}
-
-	type readingDTO struct {
-		ID               int64     `json:"id"`
-		CustomerID       *int64    `json:"customer_id,omitempty"`
-		ReadingValue     float64   `json:"reading_value"`
-		ReadingDate      time.Time `json:"reading_date"`
-		CollectorName    string    `json:"collector_name"`
-		ApprovalStatus   string    `json:"approval_status"`
-		ClientMutationID *string   `json:"client_mutation_id,omitempty"`
-		WhatsAppSent     bool      `json:"whatsapp_sent"`
-	}
-
-	var dtos []readingDTO
-	var maxID int64
-	for _, r := range readings {
-		if r.ID > maxID {
-			maxID = r.ID
-		}
-		readingDate := time.Now()
-		if r.ReadingDate != nil {
-			readingDate = *r.ReadingDate
-		}
-		dtos = append(dtos, readingDTO{
-			ID:               r.ID,
-			CustomerID:       r.CustomerID,
-			ReadingValue:     r.ReadingValue,
-			ReadingDate:      readingDate,
-			CollectorName:    r.CollectorName,
-			ApprovalStatus:   r.ApprovalStatus,
-			ClientMutationID: r.ClientMutationID,
-			WhatsAppSent:     r.WhatsAppSent,
-		})
-	}
-
-	if err := s.postgrestUpsert("meter_readings", dtos); err != nil {
-		return 0, err
-	}
-	s.setLastSyncedID("meter_readings", maxID)
-	return len(dtos), nil
-}
-
-// 4. Sync Invoices
-func (s *CloudSyncService) syncInvoices() (int, error) {
-	lastID := s.getLastSyncedID("invoices")
-	var invoices []models.Invoice
-	if err := s.db.Where("id > ?", lastID).Order("id ASC").Limit(100).Find(&invoices).Error; err != nil || len(invoices) == 0 {
-		return 0, err
-	}
-
-	type invoiceDTO struct {
-		ID               int64     `json:"id"`
-		CustomerID       *int64    `json:"customer_id,omitempty"`
-		ReadingID        *int64    `json:"reading_id,omitempty"`
-		PreviousReading  float64   `json:"previous_reading"`
-		CurrentReading   float64   `json:"current_reading"`
-		Consumption      float64   `json:"consumption"`
-		ConsumptionValue float64   `json:"consumption_value"`
-		KwhPriceSnapshot float64   `json:"kwh_price_snapshot"`
-		FixedFeeSnapshot float64   `json:"fixed_fee_snapshot"`
-		Arrears          float64   `json:"arrears"`
-		TotalDue         float64   `json:"total_due"`
-		PaidAmount       float64   `json:"paid_amount"`
-		RemainingAmount  float64   `json:"remaining_amount"`
-		BillingCycle     *string   `json:"billing_cycle,omitempty"`
-		TotalAmount      float64   `json:"total_amount"`
-		DueDate          string    `json:"due_date"`
-		ApprovalStatus   string    `json:"approval_status"`
-		Status           string    `json:"status"`
-		CreatedAt        time.Time `json:"created_at"`
-	}
-
-	var dtos []invoiceDTO
-	var maxID int64
-	for _, inv := range invoices {
-		if inv.ID > maxID {
-			maxID = inv.ID
-		}
-		createdAt := time.Now()
-		if inv.CreatedAt != nil {
-			createdAt = *inv.CreatedAt
-		}
-		dtos = append(dtos, invoiceDTO{
-			ID:               inv.ID,
-			CustomerID:       inv.CustomerID,
-			ReadingID:        inv.ReadingID,
-			PreviousReading:  inv.PreviousReading,
-			CurrentReading:   inv.CurrentReading,
-			Consumption:      inv.Consumption,
-			ConsumptionValue: inv.ConsumptionValue,
-			KwhPriceSnapshot: inv.KwhPriceSnapshot,
-			FixedFeeSnapshot: inv.FixedFeeSnapshot,
-			Arrears:          inv.Arrears,
-			TotalDue:         inv.TotalDue,
-			PaidAmount:       inv.PaidAmount,
-			RemainingAmount:  inv.RemainingAmount,
-			BillingCycle:     inv.BillingCycle,
-			TotalAmount:      inv.TotalAmount,
-			DueDate:          inv.DueDate.Format("2006-01-02"),
-			ApprovalStatus:   inv.ApprovalStatus,
-			Status:           inv.Status,
+		payload.Customers = append(payload.Customers, CustomerDTO{
+			SubscriberNumber: c.SubscriberNumber,
+			FullName:         c.FullName,
+			PhoneNumber:      c.PhoneNumber,
+			IdCardURL:        c.IdCardURL,
+			Address:          c.Address,
+			MeterNumber:      c.MeterNumber,
+			RouteNumber:      c.RouteNumber,
+			PlanName:         planName,
+			InitialReading:   c.InitialReading,
+			StartCycle:       c.StartCycle,
+			Status:           c.Status,
+			SortOrder:        c.SortOrder,
+			IsDeleted:        c.IsDeleted,
 			CreatedAt:        createdAt,
 		})
 	}
 
-	if err := s.postgrestUpsert("invoices", dtos); err != nil {
+	_, err := s.callSupabaseRPC("sync_station_payload", payload)
+	if err != nil {
 		return 0, err
 	}
-	s.setLastSyncedID("invoices", maxID)
-	return len(dtos), nil
+	return len(customers), nil
 }
 
-// 5. Sync Payments
-func (s *CloudSyncService) syncPayments() (int, error) {
-	lastID := s.getLastSyncedID("payments")
-	var payments []models.Payment
-	if err := s.db.Where("id > ?", lastID).Order("id ASC").Limit(100).Find(&payments).Error; err != nil || len(payments) == 0 {
-		return 0, err
+func (s *CloudSyncService) cleanupOldOutbox() {
+	if s.db == nil {
+		return
 	}
-
-	type paymentDTO struct {
-		ID               int64     `json:"id"`
-		InvoiceID        *int64    `json:"invoice_id,omitempty"`
-		CustomerID       *int64    `json:"customer_id,omitempty"`
-		ReceiptNumber    *string   `json:"receipt_number,omitempty"`
-		PaymentMethod    string    `json:"payment_method"`
-		AmountPaid       float64   `json:"amount_paid"`
-		PaymentDate      time.Time `json:"payment_date"`
-		AccountantName   string    `json:"accountant_name"`
-		ApprovalStatus   string    `json:"approval_status"`
-		Notes            *string   `json:"notes,omitempty"`
-		ClientMutationID *string   `json:"client_mutation_id,omitempty"`
-		WhatsAppSent     bool      `json:"whatsapp_sent"`
-	}
-
-	var dtos []paymentDTO
-	var maxID int64
-	for _, p := range payments {
-		if p.ID > maxID {
-			maxID = p.ID
-		}
-		paymentDate := time.Now()
-		if p.PaymentDate != nil {
-			paymentDate = *p.PaymentDate
-		}
-		dtos = append(dtos, paymentDTO{
-			ID:               p.ID,
-			InvoiceID:        p.InvoiceID,
-			CustomerID:       p.CustomerID,
-			ReceiptNumber:    p.ReceiptNumber,
-			PaymentMethod:    p.PaymentMethod,
-			AmountPaid:       p.AmountPaid,
-			PaymentDate:      paymentDate,
-			AccountantName:   p.AccountantName,
-			ApprovalStatus:   p.ApprovalStatus,
-			Notes:            p.Notes,
-			ClientMutationID: p.ClientMutationID,
-			WhatsAppSent:     p.WhatsAppSent,
-		})
-	}
-
-	if err := s.postgrestUpsert("payments", dtos); err != nil {
-		return 0, err
-	}
-	s.setLastSyncedID("payments", maxID)
-	return len(dtos), nil
-}
-
-// 6. Process custom outbox events
-func (s *CloudSyncService) processOutboxEvents() (int, error) {
-	type outboxRecord struct {
-		ID        int64           `gorm:"column:id"`
-		TableName string          `gorm:"column:table_name"`
-		RecordID  int64           `gorm:"column:record_id"`
-		Operation string          `gorm:"column:operation"`
-		Payload   json.RawMessage `gorm:"column:payload"`
-	}
-
-	var pending []outboxRecord
-	if err := s.db.Table("sync_outbox").Where("status = 'PENDING'").Order("id ASC").Limit(50).Find(&pending).Error; err != nil || len(pending) == 0 {
-		return 0, nil
-	}
-
-	count := 0
-	for _, r := range pending {
-		if err := s.postgrestUpsert(r.TableName, r.Payload); err != nil {
-			_ = s.db.Table("sync_outbox").Where("id = ?", r.ID).Updates(map[string]interface{}{
-				"attempts":   gorm.Expr("attempts + 1"),
-				"last_error": err.Error(),
-			})
-		} else {
-			_ = s.db.Table("sync_outbox").Where("id = ?", r.ID).Updates(map[string]interface{}{
-				"status":    "SYNCED",
-				"synced_at": time.Now(),
-			})
-			count++
-		}
-	}
-	return count, nil
+	cutoff := time.Now().AddDate(0, 0, -30)
+	_ = s.db.Where("status = ? AND synced_at < ?", "SYNCED", cutoff).Delete(&OutboxRow{}).Error
+	log.Println("🧹 Cleaned up synced outbox records older than 30 days")
 }

@@ -44,6 +44,7 @@ import toast from 'react-hot-toast';
 import type { Invoice, Payment, Customer } from '../types';
 import type { GridRowData, ComputedGridRow } from '../types/excelGrid.types';
 import { useDebouncedRealtime } from '../utils/debouncedRealtime';
+import { QUERY_KEYS, invalidateFinancialTree } from '../constants/queryKeys';
 
 interface ExcelSheetTabsProps {
   cycles: Array<{ code: string; label: string; count: number }>;
@@ -398,10 +399,7 @@ const Invoices: React.FC = () => {
       setShowReversePaymentModal(false);
       setSelectedPaymentForReverse(null);
       setReverseReason('');
-      queryClient.invalidateQueries({ queryKey: ['payments'] });
-      queryClient.invalidateQueries({ queryKey: ['invoices'] });
-      queryClient.invalidateQueries({ queryKey: ['customers'] });
-      queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] });
+      invalidateFinancialTree(queryClient);
     },
     onError: (error: any) => {
       toast.error(`فشل إلغاء السند: ${error.response?.data?.message || error.message}`);
@@ -444,9 +442,7 @@ const Invoices: React.FC = () => {
       else if (field === 'route') cellPayload.route_number = String(value).trim();
 
       await api.put(`/readings/${targetId}/cell-update`, cellPayload);
-      await queryClient.invalidateQueries({ queryKey: ['invoices'] });
-      await queryClient.invalidateQueries({ queryKey: ['payments'] });
-      await queryClient.invalidateQueries({ queryKey: ['customers'] });
+      invalidateFinancialTree(queryClient);
 
       toast.success(
         `تم حفظ التعديل وإعادة الحساب التتابعي للسلسلة بنجاح — إجمالي المستحق: ${updatedRow.totalDue.toLocaleString('en-US')} ر.ي`
@@ -1127,10 +1123,9 @@ const Invoices: React.FC = () => {
           setSelectedRoute('all');
           setSearchQuery('');
           setPage(1);
-          await queryClient.invalidateQueries({ queryKey: ['invoices'] });
-          await queryClient.invalidateQueries({ queryKey: ['routes'] });
-          await queryClient.invalidateQueries({ queryKey: ['customers'] });
-          await queryClient.refetchQueries({ queryKey: ['invoices'] });
+          invalidateFinancialTree(queryClient);
+          await queryClient.invalidateQueries({ queryKey: QUERY_KEYS.routes });
+          await queryClient.refetchQueries({ queryKey: QUERY_KEYS.invoices.all });
         }}
       />
     </div>

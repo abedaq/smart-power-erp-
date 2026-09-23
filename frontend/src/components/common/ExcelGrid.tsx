@@ -128,16 +128,8 @@ export const ExcelGrid: React.FC<ExcelGridProps> = ({
     return map;
   }, [initialRows]);
 
-  // Track modified cell keys (id:field) to persist amber highlighting permanently across refreshes
-  const [dirtyCells, setDirtyCells] = useState<Set<string>>(() => {
-    try {
-      const saved = localStorage.getItem('smartpower_grid_dirty_cells');
-      if (saved) {
-        return new Set(JSON.parse(saved));
-      }
-    } catch {}
-    return new Set();
-  });
+  // Track modified cell keys (id:field) in live session memory ONLY (No localStorage persistence)
+  const [dirtyCells, setDirtyCells] = useState<Set<string>>(new Set());
 
   const markCellDirty = (id: number, field: keyof GridRowData) => {
     const key = `${id}:${field}`;
@@ -145,9 +137,6 @@ export const ExcelGrid: React.FC<ExcelGridProps> = ({
       if (prev.has(key)) return prev;
       const next = new Set(prev);
       next.add(key);
-      try {
-        localStorage.setItem('smartpower_grid_dirty_cells', JSON.stringify(Array.from(next)));
-      } catch {}
       return next;
     });
   };
@@ -158,9 +147,6 @@ export const ExcelGrid: React.FC<ExcelGridProps> = ({
       if (!prev.has(key)) return prev;
       const next = new Set(prev);
       next.delete(key);
-      try {
-        localStorage.setItem('smartpower_grid_dirty_cells', JSON.stringify(Array.from(next)));
-      } catch {}
       return next;
     });
   };

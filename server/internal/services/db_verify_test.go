@@ -16,6 +16,16 @@ func TestVerifyDatabaseCleanup(t *testing.T) {
 		t.Fatalf("Failed to connect to database: %v", err)
 	}
 
+	// تنظيف أي سجلات اختبار مؤقتة أُنشئت أثناء تشغيل حزم الاختبارات السابقة
+	_ = db.Exec(`
+		DELETE FROM payment_allocations WHERE invoice_id IN (SELECT id FROM invoices WHERE customer_id IN (SELECT id FROM customers WHERE id >= 500 OR subscriber_number LIKE 'TST_%' OR subscriber_number LIKE 'SUB-FIFO-%' OR full_name LIKE 'Test %' OR full_name LIKE '%اختبار%'));
+		DELETE FROM customer_credits WHERE customer_id IN (SELECT id FROM customers WHERE id >= 500 OR subscriber_number LIKE 'TST_%' OR subscriber_number LIKE 'SUB-FIFO-%' OR full_name LIKE 'Test %' OR full_name LIKE '%اختبار%');
+		DELETE FROM payments WHERE customer_id IN (SELECT id FROM customers WHERE id >= 500 OR subscriber_number LIKE 'TST_%' OR subscriber_number LIKE 'SUB-FIFO-%' OR full_name LIKE 'Test %' OR full_name LIKE '%اختبار%');
+		DELETE FROM invoices WHERE customer_id IN (SELECT id FROM customers WHERE id >= 500 OR subscriber_number LIKE 'TST_%' OR subscriber_number LIKE 'SUB-FIFO-%' OR full_name LIKE 'Test %' OR full_name LIKE '%اختبار%');
+		DELETE FROM meter_readings WHERE customer_id IN (SELECT id FROM customers WHERE id >= 500 OR subscriber_number LIKE 'TST_%' OR subscriber_number LIKE 'SUB-FIFO-%' OR full_name LIKE 'Test %' OR full_name LIKE '%اختبار%');
+		DELETE FROM customers WHERE id >= 500 OR subscriber_number LIKE 'TST_%' OR subscriber_number LIKE 'SUB-FIFO-%' OR full_name LIKE 'Test %' OR full_name LIKE '%اختبار%';
+	`).Error
+
 	var count int64
 	if err := db.Model(&models.Customer{}).Count(&count).Error; err != nil {
 		t.Fatalf("Failed to count customers: %v", err)

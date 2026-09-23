@@ -938,21 +938,10 @@ func (s *CustomerService) enrichCustomersBatch(customers []models.Customer) {
 		}
 	}
 
-	// 3. Batch fetch remaining arrears from unpaid/partially paid invoices
-	type ArrearsRow struct {
-		CustomerID     int64   `gorm:"column:customer_id"`
-		RemainingTotal float64 `gorm:"column:remaining_total"`
-	}
-	var arrearsRows []ArrearsRow
-	s.db.Model(&models.Invoice{}).
-		Select("customer_id, COALESCE(SUM(remaining_amount), 0) as remaining_total").
-		Where("customer_id IN (?) AND (status IN ('Unpaid', 'Partially_Paid') OR remaining_amount < 0)", customerIDs).
-		Group("customer_id").
-		Scan(&arrearsRows)
-
-	arrearsMap := make(map[int64]float64, len(arrearsRows))
-	for _, a := range arrearsRows {
-		arrearsMap[a.CustomerID] = a.RemainingTotal
+	// 3. Populate arrears strictly from the latest invoice per customer (Single Source of Truth)
+	arrearsMap := make(map[int64]float64, len(customerIDs))
+	for custID, inv := range latestInvoiceMap {
+		arrearsMap[custID] = inv.RemainingAmount
 	}
 
 	// 4. Batch fetch available credits
@@ -1035,13 +1024,10 @@ func (s *CustomerService) enrichCustomerCalculations(c *models.Customer) {
 		c.CurrentReading = c.InitialReading
 	}
 
-	var invoiceSummary struct {
-		RemainingTotal float64
+	remainingTotal := c.TotalDue
+	if hasInv {
+		remainingTotal = latestInvoice.RemainingAmount
 	}
-	s.db.Model(&models.Invoice{}).
-		Select("COALESCE(SUM(remaining_amount), 0) as remaining_total").
-		Where("customer_id = ? AND (status IN ('Unpaid', 'Partially_Paid') OR remaining_amount < 0)", c.ID).
-		Scan(&invoiceSummary)
 
 	var creditSummary struct {
 		AvailableTotal float64
@@ -1051,10 +1037,10 @@ func (s *CustomerService) enrichCustomerCalculations(c *models.Customer) {
 		Where("customer_id = ? AND status = 'AVAILABLE'", c.ID).
 		Scan(&creditSummary)
 
-	c.Arrears = invoiceSummary.RemainingTotal
-	c.TotalDue = invoiceSummary.RemainingTotal
+	c.Arrears = remainingTotal
+	c.TotalDue = remainingTotal
 	c.AvailableCredits = creditSummary.AvailableTotal
-	c.Balance = invoiceSummary.RemainingTotal - creditSummary.AvailableTotal
+	c.Balance = remainingTotal - creditSummary.AvailableTotal
 }
 
 func (s *CustomerService) GetRoutes() ([]string, error) {

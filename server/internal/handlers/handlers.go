@@ -726,6 +726,12 @@ func (h *Handlers) UpdateReading(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
 
+	if h.eventHub != nil {
+		h.eventHub.Broadcast("READINGS_CHANGED", map[string]interface{}{"id": id, "action": "UPDATE"})
+		h.eventHub.Broadcast("INVOICES_CHANGED", nil)
+		h.eventHub.Broadcast("CUSTOMERS_CHANGED", nil)
+	}
+
 	return c.JSON(fiber.Map{"success": true, "data": updated, "reading": updated, "message": "Reading updated successfully"})
 }
 
@@ -861,9 +867,9 @@ func (h *Handlers) SendTestWhatsApp(c *fiber.Ctx) error {
 	}
 	h.db.Create(&msg)
 
-	go func() {
+	services.SafeGo("SendWhatsAppTestMessage", func() {
 		_ = h.whatsappService.SendTextMessage(context.Background(), phone, req.Message)
-	}()
+	})
 
 	return c.JSON(fiber.Map{"success": true, "message": "Test message queued"})
 }
@@ -1012,9 +1018,14 @@ func (h *Handlers) SendWarningWhatsApp(c *fiber.Ctx) error {
 
 	amountDue := req.Amount
 	if amountDue <= 0 {
-		h.db.Model(&models.Invoice{}).
-			Where("customer_id = ? AND status IN ('Unpaid', 'Partially_Paid')", customer.ID).
-			Select("COALESCE(SUM(remaining_amount), 0)").Scan(&amountDue)
+		amountDue = customer.TotalDue
+		if amountDue <= 0 {
+			var latestInv models.Invoice
+			if err := h.db.Where("customer_id = ? AND approval_status != 'REJECTED'", customer.ID).
+				Order("id DESC").First(&latestInv).Error; err == nil && latestInv.RemainingAmount > 0 {
+				amountDue = latestInv.RemainingAmount
+			}
+		}
 	}
 
 	msgText := fmt.Sprintf(
@@ -1096,9 +1107,14 @@ func (h *Handlers) SendBulkWarningsWhatsApp(c *fiber.Ctx) error {
 
 		amountDue := item.Amount
 		if amountDue <= 0 {
-			h.db.Model(&models.Invoice{}).
-				Where("customer_id = ? AND status IN ('Unpaid', 'Partially_Paid')", customer.ID).
-				Select("COALESCE(SUM(remaining_amount), 0)").Scan(&amountDue)
+			amountDue = customer.TotalDue
+			if amountDue <= 0 {
+				var latestInv models.Invoice
+				if err := h.db.Where("customer_id = ? AND approval_status != 'REJECTED'", customer.ID).
+					Order("id DESC").First(&latestInv).Error; err == nil && latestInv.RemainingAmount > 0 {
+					amountDue = latestInv.RemainingAmount
+				}
+			}
 		}
 
 		msgText := fmt.Sprintf(
@@ -1245,9 +1261,19 @@ func (h *Handlers) GetDashboardSummary(c *fiber.Ctx) error {
 
 	h.db.Model(&models.Customer{}).Where("is_deleted = false").Count(&totalCustomers)
 	h.db.Model(&models.Invoice{}).Count(&totalInvoices)
-	h.db.Model(&models.Invoice{}).Select("COALESCE(SUM(total_due), 0)").Scan(&totalBilled)
-	h.db.Model(&models.Invoice{}).Select("COALESCE(SUM(paid_amount), 0)").Scan(&totalCollected)
-	h.db.Model(&models.Invoice{}).Where("status IN ('Unpaid', 'Partially_Paid')").Select("COALESCE(SUM(remaining_amount), 0)").Scan(&totalArrears)
+	h.db.Model(&models.Invoice{}).Where("approval_status != 'REJECTED'").Select("COALESCE(SUM(total_amount), 0)").Scan(&totalBilled)
+	h.db.Model(&models.Invoice{}).Where("approval_status != 'REJECTED'").Select("COALESCE(SUM(paid_amount), 0)").Scan(&totalCollected)
+	h.db.Model(&models.Customer{}).Where("is_deleted = false AND total_due > 0").Select("COALESCE(SUM(total_due), 0)").Scan(&totalArrears)
+	if totalArrears == 0 {
+		h.db.Raw(`
+			SELECT COALESCE(SUM(latest_due), 0) FROM (
+				SELECT DISTINCT ON (customer_id) remaining_amount as latest_due
+				FROM invoices
+				WHERE approval_status != 'REJECTED' AND remaining_amount > 0
+				ORDER BY customer_id, id DESC
+			) sub
+		`).Scan(&totalArrears)
+	}
 
 	return c.JSON(fiber.Map{
 		"success": true,

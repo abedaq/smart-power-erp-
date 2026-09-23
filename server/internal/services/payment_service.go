@@ -186,7 +186,89 @@ func (s *PaymentService) CreatePayment(req CreatePaymentRequest) (*PaymentResult
 				}
 			}
 
-			// 2. Apply remaining payment directly to target invoice (preserving exact paid amount & negative balance)
+			// 2. Apply payment to target invoice
+			if remainingPaymentToAllocate > 0 {
+				var allocAmount float64
+				if targetInvoice.RemainingAmount > 0 {
+					allocAmount = math.Min(remainingPaymentToAllocate, targetInvoice.RemainingAmount)
+				}
+
+				if allocAmount > 0 {
+					remainingPaymentToAllocate -= allocAmount
+					targetInvoice.PaidAmount += allocAmount
+					targetInvoice.RemainingAmount = math.Round((targetInvoice.TotalDue - targetInvoice.PaidAmount) * 100) / 100
+					if targetInvoice.RemainingAmount <= 0 {
+						targetInvoice.Status = "Paid"
+					} else {
+						targetInvoice.Status = "Partially_Paid"
+					}
+					_ = tx.Save(targetInvoice)
+
+					alloc := models.PaymentAllocation{
+						PaymentID:       payment.ID,
+						InvoiceID:       targetInvoice.ID,
+						AmountAllocated: allocAmount,
+						CreatedAt:       &now,
+					}
+					_ = tx.Create(&alloc)
+					allocations = append(allocations, alloc)
+				}
+			}
+
+			// 3. Flow remaining payment to subsequent (downstream) unpaid invoices
+			if remainingPaymentToAllocate > 0 {
+				var downstreamUnpaid []models.Invoice
+				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+					Where("customer_id = ? AND id != ? AND approval_status != 'REJECTED' AND remaining_amount > 0 AND status IN ('Unpaid', 'Partially_Paid')", customer.ID, targetInvoice.ID).
+					Find(&downstreamUnpaid).Error; err == nil {
+
+					targetIdx := 0
+					if targetInvoice.BillingCycle != nil {
+						targetIdx = GetCycleSortIndex(*targetInvoice.BillingCycle)
+					}
+					var filteredDownstream []models.Invoice
+					for _, inv := range downstreamUnpaid {
+						invCycle := ""
+						if inv.BillingCycle != nil {
+							invCycle = *inv.BillingCycle
+						}
+						invIdx := GetCycleSortIndex(invCycle)
+						if invIdx > targetIdx || (invIdx == targetIdx && inv.ID > targetInvoice.ID) {
+							filteredDownstream = append(filteredDownstream, inv)
+						}
+					}
+					sort.Slice(filteredDownstream, func(i, j int) bool {
+						return filteredDownstream[i].ID < filteredDownstream[j].ID
+					})
+
+					for i := range filteredDownstream {
+						if remainingPaymentToAllocate <= 0 {
+							break
+						}
+						downAlloc := math.Min(remainingPaymentToAllocate, filteredDownstream[i].RemainingAmount)
+						remainingPaymentToAllocate -= downAlloc
+						filteredDownstream[i].PaidAmount += downAlloc
+						filteredDownstream[i].RemainingAmount = math.Round((filteredDownstream[i].TotalDue - filteredDownstream[i].PaidAmount) * 100) / 100
+						if filteredDownstream[i].RemainingAmount <= 0 {
+							filteredDownstream[i].Status = "Paid"
+						} else {
+							filteredDownstream[i].Status = "Partially_Paid"
+						}
+						_ = tx.Save(&filteredDownstream[i])
+
+						alloc := models.PaymentAllocation{
+							PaymentID:       payment.ID,
+							InvoiceID:       filteredDownstream[i].ID,
+							AmountAllocated: downAlloc,
+							CreatedAt:       &now,
+						}
+						_ = tx.Create(&alloc)
+						allocations = append(allocations, alloc)
+					}
+				}
+			}
+
+			// 4. If all prior, target, and downstream invoices are fully paid and there's STILL excess money, record overpayment on target
 			if remainingPaymentToAllocate > 0 {
 				allocAmount := remainingPaymentToAllocate
 				remainingPaymentToAllocate = 0
@@ -194,8 +276,6 @@ func (s *PaymentService) CreatePayment(req CreatePaymentRequest) (*PaymentResult
 				targetInvoice.RemainingAmount = math.Round((targetInvoice.TotalDue - targetInvoice.PaidAmount) * 100) / 100
 				if targetInvoice.RemainingAmount <= 0 {
 					targetInvoice.Status = "Paid"
-				} else {
-					targetInvoice.Status = "Partially_Paid"
 				}
 				_ = tx.Save(targetInvoice)
 
@@ -469,6 +549,13 @@ func (s *PaymentService) RejectPayment(id int64, reason string, auditCtx models.
 			return err
 		}
 
+		// 1. Lock customer row first (Deterministic Global Lock Ordering)
+		var customer models.Customer
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&customer, payment.CustomerID).Error; err != nil {
+			return fmt.Errorf("customer not found: %w", err)
+		}
+
 		now := time.Now().UTC()
 		// Reverse allocations
 		for _, alloc := range payment.Allocations {
@@ -559,6 +646,13 @@ func (s *PaymentService) ReversePayment(id int64, reason string, auditCtx models
 		}
 		if payment.ApprovalStatus == "REVERSED" {
 			return fmt.Errorf("payment is already reversed")
+		}
+
+		// 0. Deterministic Lock Ordering: Lock customer row first
+		var customer models.Customer
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&customer, payment.CustomerID).Error; err != nil {
+			return fmt.Errorf("customer not found: %w", err)
 		}
 
 		// 1. Accounting Safety Check: Customer Credit
@@ -738,12 +832,15 @@ func SyncCustomerFinancials(tx *gorm.DB, customerID int64) error {
 	var totalDebt float64
 	var totalCredits float64
 
-	// 1. حساب إجمالي الديون غير المسددة المعتمدة
-	if err := tx.Model(&models.Invoice{}).
-		Where("customer_id = ? AND status IN ('Unpaid', 'Partially_Paid') AND approval_status = 'APPROVED'", customerID).
-		Select("COALESCE(SUM(remaining_amount), 0)").
-		Scan(&totalDebt).Error; err != nil {
-		return err
+	// 1. حساب إجمالي الديون من أحدث فاتورة للمشترك (بدون تكرار أو تضخيم)
+	var latestInv models.Invoice
+	if err := tx.Where("customer_id = ? AND approval_status != 'REJECTED'", customerID).
+		Order("id DESC").First(&latestInv).Error; err == nil {
+		if latestInv.RemainingAmount > 0 {
+			totalDebt = latestInv.RemainingAmount
+		} else {
+			totalDebt = 0
+		}
 	}
 
 	// 2. حساب إجمالي الأرصدة الدائنة المتاحة

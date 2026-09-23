@@ -477,13 +477,13 @@ func (s *UpdateService) DownloadUpdate(ctx context.Context, downloadURL string, 
 
 // StartAsyncDownload starts the update download in a background goroutine
 func (s *UpdateService) StartAsyncDownload(downloadURL, sha256 string) {
-	go func() {
+	SafeGo("AsyncUpdateDownload", func() {
 		ctx := context.Background()
 		_, err := s.DownloadUpdate(ctx, downloadURL, sha256)
 		if err != nil {
 			log.Printf("❌ Async update download failed: %v", err)
 		}
-	}()
+	})
 }
 
 // ApplyUpdate performs safe atomic Windows hot-swap binary replacement.
@@ -632,7 +632,7 @@ func (s *UpdateService) ApplyUpdate(downloadedFilePath string) error {
 	shutdownFn := s.shutdownFn
 	s.mu.RUnlock()
 
-	go func() {
+	SafeGo("GracefulShutdownForUpdate", func() {
 		time.Sleep(300 * time.Millisecond)
 		log.Println("🛑 Application is terminating to allow atomic binary replacement...")
 		if shutdownFn != nil {
@@ -640,7 +640,7 @@ func (s *UpdateService) ApplyUpdate(downloadedFilePath string) error {
 		}
 		time.Sleep(500 * time.Millisecond)
 		os.Exit(0)
-	}()
+	})
 
 	return nil
 }

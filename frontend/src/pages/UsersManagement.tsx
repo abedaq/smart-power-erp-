@@ -4,6 +4,7 @@ import { getUsersApi, createUserApi, updateUserApi, resetUserPasswordApi } from 
 import { UserCheck, Plus, Key, CheckCircle, XCircle, Gauge, Shield, Users, Edit3, Copy } from 'lucide-react';
 import { safeCopyToClipboard } from '../utils/formatters';
 import toast from 'react-hot-toast';
+import { QUERY_KEYS } from '../constants/queryKeys';
 
 interface UserData {
   id: number;
@@ -36,7 +37,7 @@ const UsersManagement: React.FC = () => {
   const [editRole, setEditRole] = useState<'ADMIN' | 'CASHIER' | 'COLLECTOR'>('COLLECTOR');
 
   const { data: users = [], isLoading } = useQuery({
-    queryKey: ['users'],
+    queryKey: QUERY_KEYS.users,
     queryFn: getUsersApi
   });
 
@@ -53,7 +54,7 @@ const UsersManagement: React.FC = () => {
         setShowAddModal(false);
         setSuccessPasswordInfo({ username, fullName, pass: password });
         resetForm();
-        queryClient.invalidateQueries({ queryKey: ['users'] });
+        queryClient.invalidateQueries({ queryKey: QUERY_KEYS.users });
       } else {
         toast.error(res.message || 'حدث خطأ أثناء الإضافة');
       }
@@ -68,7 +69,7 @@ const UsersManagement: React.FC = () => {
     onSuccess: (res) => {
       if (res.success) {
         toast.success('تم تحديث المستخدم بنجاح');
-        queryClient.invalidateQueries({ queryKey: ['users'] });
+        queryClient.invalidateQueries({ queryKey: QUERY_KEYS.users });
       }
     }
   });

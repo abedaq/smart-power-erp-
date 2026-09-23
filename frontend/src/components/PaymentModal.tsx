@@ -7,6 +7,7 @@ import { formatYemeniPhone, type ComputedGridRow } from '../types/excelGrid.type
 import { printElementViaIframe } from '../utils/printUtils';
 import { StationLogo } from './StationLogo';
 import { useAuth } from '../context/AuthContext';
+import { QUERY_KEYS, invalidateFinancialTree } from '../constants/queryKeys';
 import { Banknote, CheckCircle, X, AlertTriangle, Printer, Send, Smartphone, Gauge, Hash, User, Sparkles, Loader2 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import type { Customer } from '../types';
@@ -197,11 +198,8 @@ o سعر الكيلوواط/ ساعة ${planPrice.toLocaleString('en-US')} ري�
     mutationFn: ({ id, invoiceId, amount, name, clientMutationId }: { id: number; invoiceId?: number; amount: number; name: string; clientMutationId: string }) => 
       payInvoice(id, amount, name, clientMutationId, invoiceId),
     onSuccess: (data: any) => {
-      queryClient.invalidateQueries({ queryKey: ['customers'] });
-      queryClient.invalidateQueries({ queryKey: ['customer-details'] });
-      queryClient.invalidateQueries({ queryKey: ['invoices'] });
-      queryClient.invalidateQueries({ queryKey: ['payments'] });
-      queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] });
+      invalidateFinancialTree(queryClient);
+      queryClient.invalidateQueries({ queryKey: QUERY_KEYS.customers.detail(customer?.id) });
 
       const paidNum = parseFormattedNumber(amountPaid);
       const newRemaining = currentRemaining - paidNum;

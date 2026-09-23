@@ -2,7 +2,9 @@ package services
 
 import (
 	"fmt"
+	"log"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"unicode"
@@ -184,4 +186,29 @@ func FormatCanonicalCycle(cycleStr string) string {
 		return fmt.Sprintf("%s %d", mName, cycleNum)
 	}
 	return fmt.Sprintf("%s %d - %d", mName, cycleNum, year)
+}
+
+// SafeGo runs a function in a new goroutine with panic recovery and logging.
+func SafeGo(name string, fn func()) {
+	SafeGoWithRecovery(name, fn, nil)
+}
+
+// SafeGoWithRecovery runs a function in a new goroutine with panic recovery, logging, and an optional custom panic handler.
+func SafeGoWithRecovery(name string, fn func(), onPanic func(r interface{})) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[PANIC RECOVERED][%s] Panic: %v\nStack Trace:\n%s", name, r, string(debug.Stack()))
+				if onPanic != nil {
+					defer func() {
+						if p := recover(); p != nil {
+							log.Printf("[PANIC HANDLER FAILED][%s] Panic in onPanic handler: %v", name, p)
+						}
+					}()
+					onPanic(r)
+				}
+			}
+		}()
+		fn()
+	}()
 }

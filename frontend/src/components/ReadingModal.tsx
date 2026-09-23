@@ -5,6 +5,7 @@ import { sanitizeDecimalInput, generateUUID } from '../utils/formatters';
 import { useAuth } from '../context/AuthContext';
 import { Gauge, CheckCircle, X, Clock, Calendar, Zap, AlertTriangle, RefreshCw, Calculator } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { QUERY_KEYS, invalidateReadingsTree } from '../constants/queryKeys';
 
 interface ReadingModalProps {
   isOpen: boolean;
@@ -36,14 +37,14 @@ export const ReadingModal: React.FC<ReadingModalProps> = ({ isOpen, onClose, cus
 
   // Fetch settings for tariff calculation
   const { data: settings } = useQuery({
-    queryKey: ['settings'],
+    queryKey: QUERY_KEYS.settings,
     queryFn: getSettings,
     enabled: !!isOpen
   });
 
   // Fetch latest live customer details (with meter_readings & invoices) from backend when modal opens
   const { data: customerDetails, isLoading: isFetchingDetails } = useQuery({
-    queryKey: ['customer-details', customer?.id],
+    queryKey: QUERY_KEYS.customers.detail(customer?.id),
     queryFn: () => getCustomerById(customer.id),
     enabled: !!isOpen && !!customer?.id,
     refetchOnWindowFocus: true
@@ -54,11 +55,7 @@ export const ReadingModal: React.FC<ReadingModalProps> = ({ isOpen, onClose, cus
   const mutation = useMutation({
     mutationFn: createReading,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['customers'] });
-      queryClient.invalidateQueries({ queryKey: ['customer-details', customer?.id] });
-      queryClient.invalidateQueries({ queryKey: ['invoices'] });
-      queryClient.invalidateQueries({ queryKey: ['routes-progress'] });
-      queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] });
+      invalidateReadingsTree(queryClient, customer?.id);
       toast.success('تم تسجيل القراءة الميدانية بنجاح! (قيد مراجعة واعتماد المدير)');
       setReadingValue('');
       onClose();

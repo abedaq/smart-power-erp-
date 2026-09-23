@@ -44,6 +44,7 @@ import {
   clearAllWhatsAppMessagesApi
 } from '../lib/api';
 import { toEnglishDigits } from '../utils/formatters';
+import { QUERY_KEYS } from '../constants/queryKeys';
 
 interface WhatsAppMessage {
   id: number;
@@ -136,9 +137,9 @@ export const WhatsApp: React.FC = () => {
 
   // Mutations
   const invalidateAll = () => {
-    queryClient.invalidateQueries({ queryKey: ['whatsapp-queue'] });
-    queryClient.invalidateQueries({ queryKey: ['whatsapp-sent'] });
-    queryClient.invalidateQueries({ queryKey: ['whatsapp-status'] });
+    queryClient.invalidateQueries({ queryKey: QUERY_KEYS.whatsapp.queue });
+    queryClient.invalidateQueries({ queryKey: QUERY_KEYS.whatsapp.sent });
+    queryClient.invalidateQueries({ queryKey: QUERY_KEYS.whatsapp.status });
   };
 
   const testMutation = useMutation({

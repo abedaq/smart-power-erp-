@@ -8,6 +8,7 @@ import {
 import type { Customer } from '../types';
 import { updateReadingApi, getCustomerById } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
+import { invalidateReadingsTree } from '../constants/queryKeys';
 
 interface StatementModalProps {
   isOpen: boolean;
@@ -52,9 +53,7 @@ export const StatementModal: React.FC<StatementModalProps> = ({
   const updateReadingMutation = useMutation({
     mutationFn: ({ id, value }: { id: number; value: number }) => updateReadingApi(id, value),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['customers'] });
-      queryClient.invalidateQueries({ queryKey: ['invoices'] });
-      queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] });
+      invalidateReadingsTree(queryClient, customer?.id);
       refetchCustomerDetails();
     },
     onError: (error: any) => alert(`تعذر تعديل القراءة: ${error.message}`)

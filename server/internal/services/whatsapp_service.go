@@ -251,9 +251,9 @@ func (s *WhatsAppService) handleEvent(rawEvt interface{}) {
 		s.currentQR = ""
 		s.mu.Unlock()
 		s.persistSessionStatus("SCAN_QR_CODE", "")
-		go func() {
+		SafeGo("WhatsAppRestartSessionOnLogout", func() {
 			_ = s.RestartSession(context.Background())
-		}()
+		})
 
 	case *events.Disconnected:
 		log.Println("⚠️ [WhatsApp] Disconnected from WhatsApp servers. Initiating auto-reconnect...")
@@ -264,7 +264,9 @@ func (s *WhatsAppService) handleEvent(rawEvt interface{}) {
 			s.status = "SCAN_QR_CODE"
 		}
 		s.mu.Unlock()
-		go s.triggerAutoReconnect()
+		SafeGo("WhatsAppAutoReconnectOnDisconnect", func() {
+			s.triggerAutoReconnect()
+		})
 
 	case *events.PairSuccess:
 		log.Printf("✅ [WhatsApp] Pairing successful! (ID: %s, Business: %s)", evt.ID.String(), evt.BusinessName)
@@ -311,7 +313,7 @@ func (s *WhatsAppService) handleEvent(rawEvt interface{}) {
 		}
 
 		// 3. Single conflict: start a 45-second delayed safe reconnect
-		go func() {
+		SafeGo("WhatsAppStreamReplacedCooldown", func() {
 			log.Println("⏳ [WhatsApp Cooldown] StreamReplaced cooldown active (45 seconds). Waiting before safe reconnect...")
 			time.Sleep(45 * time.Second)
 			s.mu.RLock()
@@ -324,7 +326,7 @@ func (s *WhatsAppService) handleEvent(rawEvt interface{}) {
 				log.Println("🔄 [WhatsApp Cooldown] 45s cooldown elapsed after StreamReplaced. Attempting safe reconnect...")
 				s.triggerAutoReconnect()
 			}
-		}()
+		})
 
 	case *events.ConnectFailure:
 		log.Printf("⚠️ [WhatsApp] Connection failure: %v", evt.Reason)
@@ -516,10 +518,12 @@ func (s *WhatsAppService) RestartSession(ctx context.Context) error {
 		return fmt.Errorf("failed to get QR channel: %w", err)
 	}
 
-	go s.listenQRChannel(qrChan)
-	go func() {
+	SafeGo("WhatsAppListenQRChannel", func() {
+		s.listenQRChannel(qrChan)
+	})
+	SafeGo("WhatsAppClientConnect", func() {
 		_ = s.client.Connect()
-	}()
+	})
 
 	return nil
 }

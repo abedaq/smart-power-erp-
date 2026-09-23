@@ -407,7 +407,7 @@ func (s *ReadingService) ApproveAllPending(auditCtx models.AuditContext) error {
 func (s *ReadingService) UpdateReading(id int64, updates map[string]interface{}, auditCtx models.AuditContext) (*models.MeterReading, error) {
 	var reading models.MeterReading
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.First(&reading, id).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&reading, id).Error; err != nil {
 			return err
 		}
 
@@ -421,6 +421,62 @@ func (s *ReadingService) UpdateReading(id int64, updates map[string]interface{},
 
 		if err := tx.Model(&reading).Updates(updates).Error; err != nil {
 			return err
+		}
+
+		// إعادة قراءة السجل بالقيم المحدثة
+		if err := tx.First(&reading, id).Error; err != nil {
+			return err
+		}
+
+		// 1. تحديث الفاتورة المرتبطة بالقراءة
+		var linkedInv models.Invoice
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("reading_id = ?", reading.ID).
+			First(&linkedInv).Error; err == nil && linkedInv.ID > 0 {
+
+			consumption := math.Max(0, reading.ReadingValue-linkedInv.PreviousReading)
+			consumptionValue := math.Round(consumption*linkedInv.KwhPriceSnapshot*100) / 100
+			totalAmount := math.Round((consumptionValue+linkedInv.FixedFeeSnapshot)*100) / 100
+			totalDue := math.Round((totalAmount+linkedInv.Arrears)*100) / 100
+			remainingAmount := math.Round((totalDue-linkedInv.PaidAmount)*100) / 100
+
+			linkedInv.CurrentReading = reading.ReadingValue
+			linkedInv.Consumption = consumption
+			linkedInv.ConsumptionValue = consumptionValue
+			linkedInv.TotalAmount = totalAmount
+			linkedInv.TotalDue = totalDue
+			linkedInv.RemainingAmount = remainingAmount
+			if remainingAmount <= 0 {
+				linkedInv.Status = "Paid"
+			} else if linkedInv.PaidAmount > 0 {
+				linkedInv.Status = "Partially_Paid"
+			} else {
+				linkedInv.Status = "Unpaid"
+			}
+
+			if err := tx.Save(&linkedInv).Error; err != nil {
+				return fmt.Errorf("failed to sync linked invoice: %w", err)
+			}
+		}
+
+		if reading.CustomerID != nil && *reading.CustomerID > 0 {
+			custID := *reading.CustomerID
+
+			// 2. ترحيل وتحديث الكاسكاد لكافة الفواتير اللاحقة للمشترك
+			billingSvc := &BillingService{db: tx}
+			_ = billingSvc.ResyncCustomerInvoicesChain(custID)
+
+			// 3. تحديث آخر قراءة للمشترك ومزامنة رصيده المالي
+			var latestReading float64
+			if err := tx.Model(&models.MeterReading{}).
+				Where("customer_id = ? AND approval_status != 'REJECTED'", custID).
+				Order("reading_date DESC, id DESC").
+				Limit(1).
+				Pluck("reading_value", &latestReading).Error; err == nil {
+				tx.Model(&models.Customer{}).Where("id = ?", custID).Update("last_reading", latestReading)
+			}
+
+			_ = SyncCustomerFinancials(tx, custID)
 		}
 
 		var ipPtr *string
