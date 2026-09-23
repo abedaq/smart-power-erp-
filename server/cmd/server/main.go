@@ -827,9 +827,11 @@ func main() {
 		}
 		log.Printf("⚠️ Port %s busy on attempt %d/4 (%v). Attempting cleanup and retry...", cleanPort, attempt, listenErr)
 		if runtime.GOOS == "windows" {
-			exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-NonInteractive", "-Command",
+			pCmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-NonInteractive", "-Command",
 				fmt.Sprintf("Get-NetTCPConnection -LocalPort %s -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }", cleanPort),
-			).Run()
+			)
+			pCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+			_ = pCmd.Run()
 		}
 		time.Sleep(1 * time.Second)
 	}
@@ -960,6 +962,7 @@ func openNativeWindow(url string, onWindowClose func()) {
 				"--no-first-run",
 				"--no-default-browser-check",
 			)
+			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
 			if err := cmd.Start(); err == nil {
 				log.Printf("🖥️ Launched application window via: %s (%s)", filepath.Base(browserPath), url)
 				_ = cmd.Wait()
@@ -972,7 +975,9 @@ func openNativeWindow(url string, onWindowClose func()) {
 		}
 
 		// Fallback to opening default system browser
-		_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+		rCmd := exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		rCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+		_ = rCmd.Start()
 		log.Printf("🖥️ Opened web interface in default browser: %s", url)
 		return
 	}
