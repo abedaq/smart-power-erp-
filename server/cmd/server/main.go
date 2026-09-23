@@ -301,6 +301,11 @@ func cleanupOldBinaries() {
 var shutdownOnce sync.Once
 
 func main() {
+	logFile := initLogging()
+	if logFile != nil {
+		defer logFile.Close()
+	}
+
 	// 0. Single-Instance Mutex Check (Local User Session Scope)
 	mutexHandle, err := acquireSingleInstanceMutex()
 	if err != nil && err.Error() == "ALREADY_RUNNING" {
@@ -316,11 +321,6 @@ func main() {
 		os.Exit(0)
 	} else if err != nil {
 		log.Printf("⚠️ Warning creating single instance mutex: %v", err)
-	}
-
-	logFile := initLogging()
-	if logFile != nil {
-		defer logFile.Close()
 	}
 
 	// 0.1 Clean up legacy .old binaries from previous atomic updates
