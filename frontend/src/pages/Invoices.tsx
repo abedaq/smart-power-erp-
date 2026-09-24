@@ -244,10 +244,18 @@ const Invoices: React.FC = () => {
     placeholderData: (prev: any) => prev,
   });
 
+  const { data: allInvoicesData } = useQuery({
+    queryKey: ['all-invoices-cycles'],
+    queryFn: () => getInvoices(1, 10000, 'all', 'all', 'all'),
+    staleTime: 10 * 1000,
+    refetchOnWindowFocus: true,
+  });
+
   const rawInvoices: Invoice[] = useMemo(() => invoicesData?.data || [], [invoicesData?.data]);
+  const allRawInvoices: Invoice[] = useMemo(() => allInvoicesData?.data || rawInvoices, [allInvoicesData?.data, rawInvoices]);
 
   // Unique 15-day cycle options
-  const uniqueCycles = useMemo(() => getUniqueCyclesFromInvoices(rawInvoices), [rawInvoices]);
+  const uniqueCycles = useMemo(() => getUniqueCyclesFromInvoices(allRawInvoices), [allRawInvoices]);
 
   const selectedCycleInvoices = useMemo(() => {
     const list = rawInvoices.filter((inv: Invoice) => {

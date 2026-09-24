@@ -16,7 +16,7 @@ import {
   downloadUpdateApi, 
   applyUpdateApi 
 } from '../services/update.service';
-import { getSavedApiUrl } from '../lib/api';
+import { useRealtime } from '../context/RealtimeContext';
 import toast from 'react-hot-toast';
 
 interface UpdateNotificationModalProps {
@@ -38,6 +38,7 @@ export const UpdateNotificationModal: React.FC<UpdateNotificationModalProps> = (
   const [totalBytes, setTotalBytes] = useState<number>(0);
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [isApplying, setIsApplying] = useState<boolean>(false);
+  const { lastUpdateProgress } = useRealtime();
 
   const mountedRef = useRef<boolean>(true);
   const isDownloadingRef = useRef<boolean>(false);
@@ -114,57 +115,26 @@ export const UpdateNotificationModal: React.FC<UpdateNotificationModalProps> = (
     }
   }, [status, isApplying, handleApplyUpdate]);
 
-  // Pure Event-Driven Architecture: Listen for Server-Sent Events (SSE) push updates
+  // Pure Event-Driven Architecture: Listen for push updates via shared RealtimeContext
   useEffect(() => {
-    if (!isOpen) return;
-
-    let eventSource: EventSource | null = null;
-    try {
-      const apiUrl = getSavedApiUrl();
-      const streamUrl = `${apiUrl}/realtime/stream`;
-      eventSource = new EventSource(streamUrl);
-
-      eventSource.onmessage = (event) => {
-        if (!event.data || !mountedRef.current) return;
-        try {
-          const parsed = JSON.parse(event.data);
-          if (parsed.type === 'system:update_progress' && parsed.payload) {
-            const p: UpdateProgress = parsed.payload;
-            if (p.status) {
-              setStatus(p.status);
-              if (p.status === 'ready') {
-                isDownloadingRef.current = false;
-              }
-            }
-            if (typeof p.progress === 'number') setProgress(p.progress);
-            if (typeof p.bytes_received === 'number') setBytesReceived(p.bytes_received);
-            if (typeof p.total_bytes === 'number') setTotalBytes(p.total_bytes);
-            if (p.status === 'error') {
-              setErrorMessage(p.last_error || 'حدث خطأ أثناء تحميل التحديث');
-              isDownloadingRef.current = false;
-              isApplyingRef.current = false;
-              hasTriggeredApplyRef.current = false;
-            }
-          }
-        } catch {
-          // ignore non-json keepalive comments
-        }
-      };
-
-      eventSource.onerror = () => {
-        // SSE auto-reconnects natively
-      };
-    } catch (err) {
-      console.error('Failed to connect SSE for update progress:', err);
-    }
-
-    return () => {
-      if (eventSource) {
-        eventSource.close();
-        eventSource = null;
+    if (!isOpen || !lastUpdateProgress || !mountedRef.current) return;
+    const p: UpdateProgress = lastUpdateProgress;
+    if (p.status) {
+      setStatus(p.status);
+      if (p.status === 'ready') {
+        isDownloadingRef.current = false;
       }
-    };
-  }, [isOpen]);
+    }
+    if (typeof p.progress === 'number') setProgress(p.progress);
+    if (typeof p.bytes_received === 'number') setBytesReceived(p.bytes_received);
+    if (typeof p.total_bytes === 'number') setTotalBytes(p.total_bytes);
+    if (p.status === 'error') {
+      setErrorMessage(p.last_error || 'حدث خطأ أثناء تحميل التحديث');
+      isDownloadingRef.current = false;
+      isApplyingRef.current = false;
+      hasTriggeredApplyRef.current = false;
+    }
+  }, [isOpen, lastUpdateProgress]);
 
   const handleStartDownload = useCallback(async () => {
     if (!updateInfo || isDownloadingRef.current) return;

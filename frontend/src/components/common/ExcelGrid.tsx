@@ -83,6 +83,7 @@ export const ExcelGrid: React.FC<ExcelGridProps> = ({
   // Unlocked historical cycles in this session
   const [unlockedPeriods, setUnlockedPeriods] = useState<Set<string>>(new Set());
   const [showHistoricalWarningModal, setShowHistoricalWarningModal] = useState<boolean>(false);
+  const [historicalConfirmInput, setHistoricalConfirmInput] = useState<string>('');
 
   // Check if current viewed cycle is a historical/closed cycle
   // Strictly activate lock ONLY if isHistorical === true is explicitly passed by parent component
@@ -232,6 +233,15 @@ export const ExcelGrid: React.FC<ExcelGridProps> = ({
     // Strict Change Guard: If value is identical to original, DO NOT save, DO NOT call API!
     if (areValuesEqual(origVal, rawValue)) {
       return;
+    }
+
+    if (field === 'currReading') {
+      const curr = Number(rawValue || 0);
+      const prev = Number(targetRow.prevReading || 0);
+      if (curr > 0 && prev > 0 && curr < prev) {
+        toast.error(`خطأ: القراءة الحالية (${curr}) أقل من القراءة السابقة (${prev}). يرجى التحقق من رقم العداد.`);
+        return;
+      }
     }
 
     markCellDirty(id, field);
@@ -954,29 +964,49 @@ export const ExcelGrid: React.FC<ExcelGridProps> = ({
                 يرجى العلم بأن تعديل أي قيمة (سواء <strong>المتأخرات</strong>، <strong>القراءات</strong>، أو <strong>المبالغ المسددة</strong>) سيؤدي تلقائياً إلى <strong>إعادة احتساب رجعي متسلسل (Retroactive Cascade)</strong> لجميع الفواتير والأرصدة اللاحقة لهذا المشترك حتى الدورة الحالية، وذلك لضمان تطابق السلسلة المحاسبية وتفادي ازدواجية المطالبات.
               </p>
               <p className="text-slate-600 font-semibold bg-white/70 p-2 rounded-lg border border-amber-100">
-                عند الضغط على <strong>"موافق"</strong>، سيتم فك قفل التعديل لهذه الدورة خلال جلستك الحالية لتتمكن من التعديل بحرية وسيقوم النظام بتحديث السلسلة تلقائياً في الخلفية.
+                لكتابة تأكيد فك القفل، يرجى كتابة العبارة التالية أدناه: <strong className="text-amber-800 font-extrabold select-all">تأكيد التعديل</strong>
               </p>
+            </div>
+
+            {/* Confirmation Text Input */}
+            <div className="pt-1">
+              <input
+                type="text"
+                value={historicalConfirmInput}
+                onChange={(e) => setHistoricalConfirmInput(e.target.value)}
+                placeholder="اكتب هنا: تأكيد التعديل"
+                className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs font-bold text-slate-900 focus:ring-2 focus:ring-amber-500 focus:outline-none"
+              />
             </div>
 
             {/* Modal Actions */}
             <div className="flex items-center justify-end gap-3 pt-2">
               <button
                 type="button"
-                onClick={() => setShowHistoricalWarningModal(false)}
+                onClick={() => {
+                  setShowHistoricalWarningModal(false);
+                  setHistoricalConfirmInput('');
+                }}
                 className="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 hover:bg-slate-100 font-bold text-xs transition-colors"
               >
                 إلغاء الأمر
               </button>
               <button
                 type="button"
+                disabled={historicalConfirmInput.trim() !== 'تأكيد التعديل'}
                 onClick={() => {
                   if (period) {
                     setUnlockedPeriods((prev) => new Set(prev).add(period));
                   }
                   setShowHistoricalWarningModal(false);
+                  setHistoricalConfirmInput('');
                   toast.success(`تم فك قفل التعديل لدورة (${period}) بنجاح. يمكنك التعديل الآن وسيتولى النظام التحديث التتابعي.`);
                 }}
-                className="px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-md shadow-amber-500/20 transition-all flex items-center gap-1.5"
+                className={`px-5 py-2.5 rounded-xl text-white font-bold text-xs transition-all flex items-center gap-1.5 ${
+                  historicalConfirmInput.trim() === 'تأكيد التعديل'
+                    ? 'bg-amber-600 hover:bg-amber-700 shadow-md shadow-amber-500/20 cursor-pointer'
+                    : 'bg-slate-300 text-slate-500 cursor-not-allowed opacity-70'
+                }`}
               >
                 <CheckCircle2 className="w-4 h-4" />
                 <span>موافق - فك القفل والمتابعة</span>

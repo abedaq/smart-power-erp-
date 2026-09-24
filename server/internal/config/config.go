@@ -14,7 +14,7 @@ import (
 )
 
 // Version holds the current release version string
-var Version = "v3.4.5.6"
+var Version = "v3.4.5.7"
 
 type Config struct {
 	Port            string

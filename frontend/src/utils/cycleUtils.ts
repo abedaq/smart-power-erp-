@@ -20,23 +20,31 @@ export function formatCycleName(dateOrCycleStr?: string | Date | null): string {
   if (typeof dateOrCycleStr === 'string') {
     const trimmed = dateOrCycleStr.trim();
     
-    // Check if format is like "أغسطس- 2 - 2026" or "أغسطس 1" or "سبتمبر - 2"
-    const arabicMatch = trimmed.match(/^([\u0600-\u06FF]+)[-\s]+([12])(?:\b|[-\s]+\d{4})/);
+    // Check if format is like "أغسطس- 2 - 2026" or "أغسطس 1" or "يناير 1 - 2027"
+    const arabicMatch = trimmed.match(/^([\u0600-\u06FF]+)[-\s]+([12])(?:\b|[-\s]+(\d{4}))/);
     if (arabicMatch) {
       const monthName = arabicMatch[1].replace(/[-_]/g, '').trim();
       const cycleNum = arabicMatch[2];
+      const year = arabicMatch[3];
+      if (year) {
+        return `${monthName} ${cycleNum} - ${year}`;
+      }
       return `${monthName} ${cycleNum}`;
     }
 
     // Check if format is "YYYY-MM-1" / "YYYY-MM-15" or "YYYY-MM-A" / "YYYY-MM-B"
     const cycleMatch = trimmed.match(/^(\d{4})-(\d{2})(?:-([12]|A|B|15|30))?$/i);
     if (cycleMatch) {
+      const year = cycleMatch[1];
       const monthIdx = parseInt(cycleMatch[2], 10) - 1;
       const monthName = ARABIC_MONTHS[monthIdx] || `شهر ${cycleMatch[2]}`;
       const suffix = cycleMatch[3];
       let cycleNum = 1;
       if (suffix === '2' || suffix?.toUpperCase() === 'B' || suffix === '30') {
         cycleNum = 2;
+      }
+      if (year && year !== '2026') {
+        return `${monthName} ${cycleNum} - ${year}`;
       }
       return `${monthName} ${cycleNum}`;
     }
@@ -46,6 +54,10 @@ export function formatCycleName(dateOrCycleStr?: string | Date | null): string {
     if (!isNaN(parsedDate.getTime())) {
       const monthName = ARABIC_MONTHS[parsedDate.getMonth()];
       const cycleNum = parsedDate.getDate() <= 15 ? 1 : 2;
+      const year = parsedDate.getFullYear();
+      if (year !== 2026) {
+        return `${monthName} ${cycleNum} - ${year}`;
+      }
       return `${monthName} ${cycleNum}`;
     }
   }
@@ -53,6 +65,10 @@ export function formatCycleName(dateOrCycleStr?: string | Date | null): string {
   if (dateOrCycleStr instanceof Date && !isNaN(dateOrCycleStr.getTime())) {
     const monthName = ARABIC_MONTHS[dateOrCycleStr.getMonth()];
     const cycleNum = dateOrCycleStr.getDate() <= 15 ? 1 : 2;
+    const year = dateOrCycleStr.getFullYear();
+    if (year !== 2026) {
+      return `${monthName} ${cycleNum} - ${year}`;
+    }
     return `${monthName} ${cycleNum}`;
   }
 
@@ -91,6 +107,13 @@ export function isSameCycle(cycleA?: string | null, cycleB?: string | null): boo
   const fmtA = formatCycleName(cycleA);
   const fmtB = formatCycleName(cycleB);
 
+  const yearA = fmtA.match(/\b(20\d{2})\b/)?.[1] || (String(cycleA).match(/\b(20\d{2})\b/)?.[1] ?? '2026');
+  const yearB = fmtB.match(/\b(20\d{2})\b/)?.[1] || (String(cycleB).match(/\b(20\d{2})\b/)?.[1] ?? '2026');
+
+  if (yearA !== yearB) {
+    return false;
+  }
+
   const normA = normalizeMonth(fmtA).replace(/\s+/g, '');
   const normB = normalizeMonth(fmtB).replace(/\s+/g, '');
 
@@ -99,7 +122,7 @@ export function isSameCycle(cycleA?: string | null, cycleB?: string | null): boo
   const rawA = normalizeMonth(String(cycleA)).replace(/[\s\-_]/g, '');
   const rawB = normalizeMonth(String(cycleB)).replace(/[\s\-_]/g, '');
 
-  return rawA === rawB || rawA.includes(normB) || rawB.includes(normA);
+  return rawA === rawB;
 }
 
 /**
@@ -156,7 +179,7 @@ export function getUniqueCyclesFromInvoices(invoices: Invoice[]): CycleOption[] 
   standardMonths.forEach((m) => {
     [1, 2].forEach((cycleNum) => {
       const label = `${m.name} ${cycleNum} - 2027`;
-      const count = map.get(label) || map.get(`${m.name} ${cycleNum}`) || 0;
+      const count = map.get(label) || map.get(`${m.name} ${cycleNum} - 2027`) || 0;
       processedLabels.add(normalizeMonth(label));
       result.push({
         code: `2027-${String(m.idx).padStart(2, '0')}-${cycleNum}`,

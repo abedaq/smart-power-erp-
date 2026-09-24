@@ -145,18 +145,95 @@ func TestPaymentAllocationWaterfallToSubsequentInvoices(t *testing.T) {
 		t.Fatalf("Expected non-nil result")
 	}
 
-	var reloadedInv2 models.Invoice
-	_ = tx.First(&reloadedInv2, inv2.ID)
-
-	if reloadedInv2.RemainingAmount != 0.0 || reloadedInv2.Status != "Paid" {
-		t.Errorf("Payment should have flowed to inv2! Expected Remaining=0, Status=Paid, got Remaining=%.2f, Status=%s",
-			reloadedInv2.RemainingAmount, reloadedInv2.Status)
-	}
-
 	var reloadedInv1 models.Invoice
 	_ = tx.First(&reloadedInv1, inv1.ID)
-	if reloadedInv1.RemainingAmount < 0.0 {
-		t.Errorf("Inv1 should not have been overpaid with negative balance when inv2 was unpaid! Got Remaining=%.2f",
-			reloadedInv1.RemainingAmount)
+	if reloadedInv1.RemainingAmount != -2000.0 {
+		t.Errorf("Expected Inv1 RemainingAmount to be -2000.00, got Remaining=%.2f", reloadedInv1.RemainingAmount)
+	}
+	if reloadedInv1.Status != "Paid" {
+		t.Errorf("Expected Inv1 Status to be 'Paid', got Status=%s", reloadedInv1.Status)
+	}
+
+	var credit models.CustomerCredit
+	if err := tx.Where("customer_id = ? AND payment_id = ?", cust.ID, res.Payment.ID).First(&credit).Error; err != nil {
+		t.Errorf("Expected CustomerCredit record to be created for overpayment, but got error: %v", err)
+	} else if credit.Amount != 2000.0 || credit.Status != "AVAILABLE" {
+		t.Errorf("Expected Credit Amount=2000.00 and Status='AVAILABLE', got Amount=%.2f, Status=%s", credit.Amount, credit.Status)
+	}
+}
+
+// TestListReadings_CycleFilter: يثبت أن دالة ListReadings تصفي القراءات بدقة حسب الدورة المحددة عبر ربط الفواتير
+func TestListReadings_CycleFilter(t *testing.T) {
+	cfg := config.LoadConfig()
+	db, err := database.InitDB(cfg)
+	if err != nil {
+		t.Fatalf("failed to connect to db: %v", err)
+	}
+
+	tx := db.Begin()
+	defer tx.Rollback()
+
+	readSvc := &ReadingService{db: tx}
+
+	plan := models.SubscriptionPlan{
+		PlanName: "فلترة دورة تجريبي",
+		KwhPrice: 1000.0,
+		FixedFee: 500.0,
+		IsActive: true,
+	}
+	_ = tx.Create(&plan)
+
+	cust := models.Customer{
+		SubscriberNumber:   "SUB-CYC-TEST-1",
+		FullName:           "مشترك اختبار فلترة الدورة",
+		Status:             "Active",
+		InitialReading:     0.0,
+		SubscriptionPlanID: &plan.ID,
+	}
+	_ = tx.Create(&cust)
+
+	_, err1 := readSvc.CreateReading(CreateReadingRequest{
+		CustomerID:   cust.ID,
+		ReadingValue: 50.0,
+		BillingCycle: "أكتوبر 1",
+	})
+	if err1 != nil {
+		t.Fatalf("CreateReading 1 failed: %v", err1)
+	}
+
+	_, err2 := readSvc.CreateReading(CreateReadingRequest{
+		CustomerID:   cust.ID,
+		ReadingValue: 100.0,
+		BillingCycle: "أكتوبر 2",
+	})
+	if err2 != nil {
+		t.Fatalf("CreateReading 2 failed: %v", err2)
+	}
+
+	// 1. فحص الدورة الأولى "أكتوبر 1"
+	r1, total1, err := readSvc.ListReadings(cust.ID, "أكتوبر 1", 1, 10)
+	if err != nil {
+		t.Fatalf("ListReadings oct1 failed: %v", err)
+	}
+	if total1 != 1 || len(r1) != 1 || r1[0].ReadingValue != 50.0 {
+		t.Errorf("Expected 1 reading for 'أكتوبر 1' with value 50, got total=%d, len=%d", total1, len(r1))
+	}
+
+	// 2. فحص الدورة الثانية "أكتوبر 2"
+	r2, total2, err := readSvc.ListReadings(cust.ID, "أكتوبر 2", 1, 10)
+	if err != nil {
+		t.Fatalf("ListReadings oct2 failed: %v", err)
+	}
+	if total2 != 1 || len(r2) != 1 || r2[0].ReadingValue != 100.0 {
+		t.Errorf("Expected 1 reading for 'أكتوبر 2' with value 100, got total=%d, len=%d", total2, len(r2))
+	}
+
+	// 3. فحص كافة الدورات "ALL"
+	rAll, totalAll, err := readSvc.ListReadings(cust.ID, "ALL", 1, 10)
+	if err != nil {
+		t.Fatalf("ListReadings ALL failed: %v", err)
+	}
+	if totalAll != 2 || len(rAll) != 2 {
+		t.Errorf("Expected 2 readings for 'ALL', got total=%d, len=%d", totalAll, len(rAll))
 	}
 }

@@ -209,6 +209,7 @@ func (s *CloudSyncService) initSyncTables() {
 			created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
 			synced_at TIMESTAMPTZ
 		);
+		ALTER TABLE public.sync_outbox ADD COLUMN IF NOT EXISTS natural_key VARCHAR(100);
 		CREATE INDEX IF NOT EXISTS idx_sync_outbox_pending_v2 ON public.sync_outbox(status, id ASC);
 		CREATE INDEX IF NOT EXISTS idx_sync_outbox_table_rec ON public.sync_outbox(table_name, record_id);
 

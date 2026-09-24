@@ -7,14 +7,18 @@ import {
   invalidateReadingsTree,
 } from '../constants/queryKeys';
 
+import type { UpdateProgress } from '../services/update.service';
+
 interface RealtimeContextType {
   isConnected: boolean;
   lastEventTime: Date | null;
+  lastUpdateProgress: UpdateProgress | null;
 }
 
 const RealtimeContext = createContext<RealtimeContextType>({
   isConnected: false,
   lastEventTime: null,
+  lastUpdateProgress: null,
 });
 
 interface SystemEvent {
@@ -27,6 +31,7 @@ export const RealtimeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const queryClient = useQueryClient();
   const [isConnected, setIsConnected] = useState(false);
   const [lastEventTime, setLastEventTime] = useState<Date | null>(null);
+  const [lastUpdateProgress, setLastUpdateProgress] = useState<UpdateProgress | null>(null);
 
   const debounceTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -110,6 +115,12 @@ export const RealtimeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                 }, 300);
                 break;
 
+              case 'system:update_progress':
+                if (isMounted && parsed.payload) {
+                  setLastUpdateProgress(parsed.payload);
+                }
+                break;
+
               default:
                 // Global fallback for any broadcasted data alteration
                 debouncedInvalidate('all', () => invalidateFinancialTree(queryClient), 400);
@@ -160,7 +171,7 @@ export const RealtimeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, [queryClient]);
 
   return (
-    <RealtimeContext.Provider value={{ isConnected, lastEventTime }}>
+    <RealtimeContext.Provider value={{ isConnected, lastEventTime, lastUpdateProgress }}>
       {children}
     </RealtimeContext.Provider>
   );

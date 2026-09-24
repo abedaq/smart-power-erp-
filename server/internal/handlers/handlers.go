@@ -1743,7 +1743,14 @@ func strPtr(s string) *string {
 
 func (h *Handlers) GetLicenseStatus(c *fiber.Ctx) error {
 	mgr := licensing.GetLicenseManager()
-	status := mgr.TriggerSync()
+	if c.Query("force") == "true" {
+		status := mgr.TriggerSync()
+		return c.JSON(fiber.Map{
+			"success": true,
+			"data":    status,
+		})
+	}
+	status := mgr.GetStatus()
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data":    status,

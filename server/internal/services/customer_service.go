@@ -704,6 +704,10 @@ func (s *CustomerService) UpdateGridCell(id int64, payload map[string]interface{
 				}
 			}
 
+			if currReading > 0 && prevReading > 0 && currReading < prevReading {
+				return fmt.Errorf("خطأ: القراءة الحالية (%.1f) أقل من القراءة السابقة (%.1f). يرجى التحقق من رقم العداد", currReading, prevReading)
+			}
+
 			// Financial calculation
 			consumption := 0.0
 			if currReading > 0 && currReading >= prevReading {
@@ -782,6 +786,9 @@ func (s *CustomerService) UpdateGridCell(id int64, payload map[string]interface{
 					for _, downInv := range downstreamInvoices {
 						if cascadePrev > 0 {
 							downInv.PreviousReading = cascadePrev
+						}
+						if downInv.CurrentReading > 0 && downInv.CurrentReading < downInv.PreviousReading {
+							downInv.CurrentReading = downInv.PreviousReading
 						}
 						downInv.Arrears = cascadeArr
 						downCons := 0.0

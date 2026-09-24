@@ -34,7 +34,7 @@ var (
 
 var (
 	// DefaultAppVersion represents current release version of SmartPower ERP
-	DefaultAppVersion = "3.4.5.6"
+	DefaultAppVersion = "3.4.5.7"
 	// DefaultManifestURL fallback remote version metadata endpoint
 	DefaultManifestURL = "https://pkuoytiickgbtfeffmxq.supabase.co/storage/v1/object/public/updates/version.json"
 )
@@ -207,7 +207,9 @@ func (s *UpdateService) CheckForUpdates() (*CheckUpdateResponse, error) {
 	currentVer := s.version
 	s.mu.RUnlock()
 
-	req, err := http.NewRequestWithContext(context.Background(), "GET", manifestURL, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", manifestURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request for update manifest: %w", err)
 	}

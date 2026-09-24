@@ -308,7 +308,7 @@ func (s *BillingService) ResyncCustomerInvoicesChain(customerID int64) error {
 		inv.TotalDue = math.Round((inv.TotalAmount+inv.Arrears)*100) / 100
 		inv.RemainingAmount = math.Round((inv.TotalDue-inv.PaidAmount)*100) / 100
 
-		if inv.RemainingAmount <= 0 && inv.PaidAmount > 0 {
+		if inv.RemainingAmount <= 0 {
 			inv.Status = "Paid"
 		} else if inv.PaidAmount > 0 {
 			inv.Status = "Partially_Paid"
@@ -328,10 +328,6 @@ func (s *BillingService) ResyncCustomerInvoicesChain(customerID int64) error {
 }
 
 func (s *BillingService) ListInvoices(filter InvoiceFilter) ([]models.Invoice, int64, error) {
-	if filter.BillingCycle != "" && !strings.EqualFold(filter.BillingCycle, "ALL") {
-		_ = s.EnsureCycleInvoices(filter.BillingCycle)
-	}
-
 	var invoices []models.Invoice
 	var total int64
 

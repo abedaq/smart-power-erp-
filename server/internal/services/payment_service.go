@@ -186,89 +186,7 @@ func (s *PaymentService) CreatePayment(req CreatePaymentRequest) (*PaymentResult
 				}
 			}
 
-			// 2. Apply payment to target invoice
-			if remainingPaymentToAllocate > 0 {
-				var allocAmount float64
-				if targetInvoice.RemainingAmount > 0 {
-					allocAmount = math.Min(remainingPaymentToAllocate, targetInvoice.RemainingAmount)
-				}
-
-				if allocAmount > 0 {
-					remainingPaymentToAllocate -= allocAmount
-					targetInvoice.PaidAmount += allocAmount
-					targetInvoice.RemainingAmount = math.Round((targetInvoice.TotalDue - targetInvoice.PaidAmount) * 100) / 100
-					if targetInvoice.RemainingAmount <= 0 {
-						targetInvoice.Status = "Paid"
-					} else {
-						targetInvoice.Status = "Partially_Paid"
-					}
-					_ = tx.Save(targetInvoice)
-
-					alloc := models.PaymentAllocation{
-						PaymentID:       payment.ID,
-						InvoiceID:       targetInvoice.ID,
-						AmountAllocated: allocAmount,
-						CreatedAt:       &now,
-					}
-					_ = tx.Create(&alloc)
-					allocations = append(allocations, alloc)
-				}
-			}
-
-			// 3. Flow remaining payment to subsequent (downstream) unpaid invoices
-			if remainingPaymentToAllocate > 0 {
-				var downstreamUnpaid []models.Invoice
-				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-					Where("customer_id = ? AND id != ? AND approval_status != 'REJECTED' AND remaining_amount > 0 AND status IN ('Unpaid', 'Partially_Paid')", customer.ID, targetInvoice.ID).
-					Find(&downstreamUnpaid).Error; err == nil {
-
-					targetIdx := 0
-					if targetInvoice.BillingCycle != nil {
-						targetIdx = GetCycleSortIndex(*targetInvoice.BillingCycle)
-					}
-					var filteredDownstream []models.Invoice
-					for _, inv := range downstreamUnpaid {
-						invCycle := ""
-						if inv.BillingCycle != nil {
-							invCycle = *inv.BillingCycle
-						}
-						invIdx := GetCycleSortIndex(invCycle)
-						if invIdx > targetIdx || (invIdx == targetIdx && inv.ID > targetInvoice.ID) {
-							filteredDownstream = append(filteredDownstream, inv)
-						}
-					}
-					sort.Slice(filteredDownstream, func(i, j int) bool {
-						return filteredDownstream[i].ID < filteredDownstream[j].ID
-					})
-
-					for i := range filteredDownstream {
-						if remainingPaymentToAllocate <= 0 {
-							break
-						}
-						downAlloc := math.Min(remainingPaymentToAllocate, filteredDownstream[i].RemainingAmount)
-						remainingPaymentToAllocate -= downAlloc
-						filteredDownstream[i].PaidAmount += downAlloc
-						filteredDownstream[i].RemainingAmount = math.Round((filteredDownstream[i].TotalDue - filteredDownstream[i].PaidAmount) * 100) / 100
-						if filteredDownstream[i].RemainingAmount <= 0 {
-							filteredDownstream[i].Status = "Paid"
-						} else {
-							filteredDownstream[i].Status = "Partially_Paid"
-						}
-						_ = tx.Save(&filteredDownstream[i])
-
-						alloc := models.PaymentAllocation{
-							PaymentID:       payment.ID,
-							InvoiceID:       filteredDownstream[i].ID,
-							AmountAllocated: downAlloc,
-							CreatedAt:       &now,
-						}
-						_ = tx.Create(&alloc)
-						allocations = append(allocations, alloc)
-					}
-				}
-			}
-
-			// 4. If all prior, target, and downstream invoices are fully paid and there's STILL excess money, record overpayment on target
+			// 2. Apply payment directly and fully to target invoice
 			if remainingPaymentToAllocate > 0 {
 				allocAmount := remainingPaymentToAllocate
 				remainingPaymentToAllocate = 0
@@ -276,6 +194,8 @@ func (s *PaymentService) CreatePayment(req CreatePaymentRequest) (*PaymentResult
 				targetInvoice.RemainingAmount = math.Round((targetInvoice.TotalDue - targetInvoice.PaidAmount) * 100) / 100
 				if targetInvoice.RemainingAmount <= 0 {
 					targetInvoice.Status = "Paid"
+				} else {
+					targetInvoice.Status = "Partially_Paid"
 				}
 				_ = tx.Save(targetInvoice)
 
@@ -357,6 +277,9 @@ func (s *PaymentService) CreatePayment(req CreatePaymentRequest) (*PaymentResult
 				for _, downInv := range downstreamInvoices {
 					if cascadePrev > 0 {
 						downInv.PreviousReading = cascadePrev
+					}
+					if downInv.CurrentReading > 0 && downInv.CurrentReading < downInv.PreviousReading {
+						downInv.CurrentReading = downInv.PreviousReading
 					}
 					downInv.Arrears = cascadeArr
 					downCons := 0.0
@@ -709,66 +632,87 @@ func (s *PaymentService) ReversePayment(id int64, reason string, auditCtx models
 		}
 
 		if len(touchedInvoiceIDs) > 0 {
-			firstTouchedID := touchedInvoiceIDs[0]
-			for _, id := range touchedInvoiceIDs {
-				if id < firstTouchedID {
-					firstTouchedID = id
-				}
-			}
-
 			var allInvoices []models.Invoice
 			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 				Where("customer_id = ? AND approval_status != 'REJECTED'", payment.CustomerID).
-				Order("id ASC").Find(&allInvoices).Error; err == nil {
+				Find(&allInvoices).Error; err == nil && len(allInvoices) > 0 {
+
+				// Sort in strict chronological cycle order
+				sort.Slice(allInvoices, func(i, j int) bool {
+					cI := ""
+					if allInvoices[i].BillingCycle != nil {
+						cI = *allInvoices[i].BillingCycle
+					}
+					cJ := ""
+					if allInvoices[j].BillingCycle != nil {
+						cJ = *allInvoices[j].BillingCycle
+					}
+					idxI := GetCycleSortIndex(cI)
+					idxJ := GetCycleSortIndex(cJ)
+					if idxI != idxJ {
+						return idxI < idxJ
+					}
+					return allInvoices[i].ID < allInvoices[j].ID
+				})
+
+				touchedSet := make(map[int64]bool, len(touchedInvoiceIDs))
+				for _, tid := range touchedInvoiceIDs {
+					touchedSet[tid] = true
+				}
 
 				startIndex := -1
 				for k, inv := range allInvoices {
-					if inv.ID == firstTouchedID {
+					if touchedSet[inv.ID] {
 						startIndex = k
 						break
 					}
 				}
 
 				if startIndex >= 0 {
-					var startInv models.Invoice
-					if err := tx.First(&startInv, firstTouchedID).Error; err == nil {
-						cascadeArr := startInv.RemainingAmount
-						cascadePrev := startInv.CurrentReading
-						if cascadePrev == 0 {
-							cascadePrev = startInv.PreviousReading
+					startInv := allInvoices[startIndex]
+					_ = tx.First(&startInv, startInv.ID)
+					cascadeArr := startInv.RemainingAmount
+					cascadePrev := startInv.CurrentReading
+					if cascadePrev == 0 {
+						cascadePrev = startInv.PreviousReading
+					}
+
+					for k := startIndex + 1; k < len(allInvoices); k++ {
+						downInv := allInvoices[k]
+						if err := tx.First(&downInv, downInv.ID).Error; err != nil {
+							return fmt.Errorf("failed to fetch cascade invoice %d: %w", downInv.ID, err)
+						}
+						if cascadePrev > 0 {
+							downInv.PreviousReading = cascadePrev
+						}
+						if downInv.CurrentReading > 0 && downInv.CurrentReading < downInv.PreviousReading {
+							downInv.CurrentReading = downInv.PreviousReading
+						}
+						downInv.Arrears = cascadeArr
+						downCons := 0.0
+						if downInv.CurrentReading > 0 && downInv.CurrentReading >= downInv.PreviousReading {
+							downCons = downInv.CurrentReading - downInv.PreviousReading
+						}
+						downInv.Consumption = downCons
+						downInv.ConsumptionValue = math.Round(downCons*downInv.KwhPriceSnapshot*100) / 100
+						downInv.TotalAmount = math.Round((downInv.ConsumptionValue+downInv.FixedFeeSnapshot)*100) / 100
+						downInv.TotalDue = math.Round((downInv.TotalAmount+downInv.Arrears)*100) / 100
+						downInv.RemainingAmount = math.Round((downInv.TotalDue-downInv.PaidAmount)*100) / 100
+						if downInv.RemainingAmount <= 0 {
+							downInv.Status = "Paid"
+						} else if downInv.PaidAmount > 0 {
+							downInv.Status = "Partially_Paid"
+						} else {
+							downInv.Status = "Unpaid"
+						}
+						if err := tx.Save(&downInv).Error; err != nil {
+							return fmt.Errorf("failed to save cascade invoice %d: %w", downInv.ID, err)
 						}
 
-						for k := startIndex + 1; k < len(allInvoices); k++ {
-							downInv := allInvoices[k]
-							if err := tx.First(&downInv, downInv.ID).Error; err != nil {
-								return fmt.Errorf("failed to fetch cascade invoice %d: %w", downInv.ID, err)
-							}
-							downInv.Arrears = cascadeArr
-							downCons := 0.0
-							if downInv.CurrentReading > 0 && downInv.CurrentReading >= downInv.PreviousReading {
-								downCons = downInv.CurrentReading - downInv.PreviousReading
-							}
-							downInv.Consumption = downCons
-							downInv.ConsumptionValue = math.Round(downCons*downInv.KwhPriceSnapshot*100) / 100
-							downInv.TotalAmount = math.Round((downInv.ConsumptionValue+downInv.FixedFeeSnapshot)*100) / 100
-							downInv.TotalDue = math.Round((downInv.TotalAmount+downInv.Arrears)*100) / 100
-							downInv.RemainingAmount = math.Round((downInv.TotalDue-downInv.PaidAmount)*100) / 100
-							if downInv.RemainingAmount <= 0 {
-								downInv.Status = "Paid"
-							} else if downInv.PaidAmount > 0 {
-								downInv.Status = "Partially_Paid"
-							} else {
-								downInv.Status = "Unpaid"
-							}
-							if err := tx.Save(&downInv).Error; err != nil {
-								return fmt.Errorf("failed to save cascade invoice %d: %w", downInv.ID, err)
-							}
-
-							if downInv.CurrentReading > 0 {
-								cascadePrev = downInv.CurrentReading
-							}
-							cascadeArr = downInv.RemainingAmount
+						if downInv.CurrentReading > 0 {
+							cascadePrev = downInv.CurrentReading
 						}
+						cascadeArr = downInv.RemainingAmount
 					}
 				}
 			}

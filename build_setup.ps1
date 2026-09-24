@@ -9,7 +9,7 @@ Write-Host "==========================================================" -Foregro
 Write-Host "SmartPower ERP - Comprehensive Installer Build Pipeline" -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 
-$RootDir = "d:\elctercity"
+$RootDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 $FrontendDir = Join-Path $RootDir "frontend"
 $ServerDir = Join-Path $RootDir "server"
 $DistPortableDir = Join-Path $RootDir "dist_portable"

@@ -505,7 +505,16 @@ func (s *ReadingService) ListReadings(customerID int64, cycle string, page, limi
 
 	query := s.db.Model(&models.MeterReading{})
 	if customerID > 0 {
-		query = query.Where("customer_id = ?", customerID)
+		query = query.Where("meter_readings.customer_id = ?", customerID)
+	}
+
+	trimmedCycle := strings.TrimSpace(cycle)
+	if trimmedCycle != "" && !strings.EqualFold(trimmedCycle, "ALL") {
+		aliases := getCycleAliases(trimmedCycle)
+		if len(aliases) > 0 {
+			query = query.Joins("JOIN invoices ON invoices.reading_id = meter_readings.id").
+				Where("invoices.billing_cycle IN ?", aliases)
+		}
 	}
 
 	if err := query.Count(&total).Error; err != nil {
@@ -522,7 +531,7 @@ func (s *ReadingService) ListReadings(customerID int64, cycle string, page, limi
 
 	err := query.Preload("Customer").
 		Preload("Customer.SubscriptionPlan").
-		Order("id DESC").
+		Order("meter_readings.id DESC").
 		Limit(limit).
 		Offset(offset).
 		Find(&readings).Error
