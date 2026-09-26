@@ -426,6 +426,37 @@ func (h *Handlers) GetBillingCycles(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "data": cycles, "cycles": cycles})
 }
 
+func (h *Handlers) GenerateNextCycle(c *fiber.Ctx) error {
+	var req struct {
+		CurrentCycle string `json:"current_cycle"`
+	}
+	_ = c.BodyParser(&req)
+	fromCycle := strings.TrimSpace(req.CurrentCycle)
+	if fromCycle == "" || fromCycle == "all" {
+		fromCycle = "سبتمبر 1"
+	}
+
+	nextCycle, count, err := h.billingService.GenerateNextCycle(fromCycle)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": err.Error()})
+	}
+
+	if h.eventHub != nil {
+		h.eventHub.Broadcast("invoices", fiber.Map{
+			"type": "cycle_generated",
+			"cycle": nextCycle,
+			"count": count,
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"success":    true,
+		"next_cycle": nextCycle,
+		"count":      count,
+		"message":    fmt.Sprintf("تم توليد كشف دورة %s بنجاح لعدد %d مشترك", nextCycle, count),
+	})
+}
+
 // ---------------- SETTINGS HANDLERS ----------------
 
 func (h *Handlers) GetSettings(c *fiber.Ctx) error {
@@ -919,6 +950,67 @@ func (h *Handlers) ConnectWhatsApp(c *fiber.Ctx) error {
 			"status": status,
 			"qr":     qr,
 		},
+	})
+}
+
+func (h *Handlers) SendBulkInvoicesWhatsApp(c *fiber.Ctx) error {
+	var req struct {
+		IDs []int64 `json:"ids"`
+	}
+	if err := c.BodyParser(&req); err != nil || len(req.IDs) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "لم يتم تحديد أي فواتير للإرسال"})
+	}
+
+	var invoices []models.Invoice
+	if err := h.db.Preload("Customer").Where("id IN ?", req.IDs).Find(&invoices).Error; err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "فشل جلب بيانات الفواتير المحددة"})
+	}
+
+	now := time.Now().UTC()
+	sourceEntity := "INVOICE"
+	msgType := "IMAGE"
+	var queueMsgs []models.WhatsAppQueueMessage
+
+	for _, inv := range invoices {
+		if inv.Customer == nil || inv.Customer.PhoneNumber == "" {
+			continue
+		}
+		phone := services.NormalizeWhatsAppPhone(inv.Customer.PhoneNumber)
+		if phone == "" {
+			continue
+		}
+		invID := inv.ID
+		queueMsgs = append(queueMsgs, models.WhatsAppQueueMessage{
+			PhoneNumber:  phone,
+			Type:         msgType,
+			Message:      nil,
+			Status:       "PENDING",
+			SourceEntity: &sourceEntity,
+			SourceID:     &invID,
+			ScheduledAt:  &now,
+			CreatedAt:    &now,
+			UpdatedAt:    &now,
+		})
+	}
+
+	if len(queueMsgs) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "message": "جميع الفواتير المحددة لا تحتوي على أرقام هواتف صالحة للمشتركين"})
+	}
+
+	if err := h.db.Create(&queueMsgs).Error; err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "message": "فشل إدراج الفواتير في طابور الواتساب"})
+	}
+
+	if h.whatsappService != nil {
+		h.whatsappService.TriggerWakeWorker()
+	}
+
+	h.logAudit(c, "WHATSAPP_SEND_BULK_INVOICES", "INVOICE", nil, fmt.Sprintf("إدراج [%d] فاتورة في طابور الواتساب دفعة واحدة", len(queueMsgs)))
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"count":   len(queueMsgs),
+		"message": fmt.Sprintf("تم إدراج %d فاتورة في طابور الواتساب بنجاح لعملية الإرسال الآمن", len(queueMsgs)),
 	})
 }
 

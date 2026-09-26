@@ -307,6 +307,10 @@ func (s *CloudSyncService) initSyncTables() {
 }
 
 func (s *CloudSyncService) Start() {
+	if s.cfg != nil && !s.cfg.EnableCloudSync {
+		log.Println("ℹ️ Cloud Sync Engine disabled via ENABLE_CLOUD_SYNC=false configuration (Local Station Mode).")
+		return
+	}
 	go s.workerLoop()
 	log.Println("☁️ Cloud Sync Engine initialized (Zero-Conflict Atomic Outbox & Natural Keys)")
 }

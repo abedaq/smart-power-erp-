@@ -136,55 +136,9 @@ func (s *PaymentService) CreatePayment(req CreatePaymentRequest) (*PaymentResult
 			remainingPaymentToAllocate := req.AmountPaid
 
 			// 1. Settle older unpaid invoices first using strict FIFO
-			var priorInvoices []models.Invoice
-			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-				Where("customer_id = ? AND id != ? AND approval_status != 'REJECTED' AND remaining_amount > 0 AND status IN ('Unpaid', 'Partially_Paid')", customer.ID, targetInvoice.ID).
-				Find(&priorInvoices).Error; err == nil {
-
-				targetIdx := 0
-				if targetInvoice.BillingCycle != nil {
-					targetIdx = GetCycleSortIndex(*targetInvoice.BillingCycle)
-				}
-				var filteredPriors []models.Invoice
-				for _, inv := range priorInvoices {
-					invCycle := ""
-					if inv.BillingCycle != nil {
-						invCycle = *inv.BillingCycle
-					}
-					invIdx := GetCycleSortIndex(invCycle)
-					if invIdx < targetIdx || (invIdx == targetIdx && inv.ID < targetInvoice.ID) {
-						filteredPriors = append(filteredPriors, inv)
-					}
-				}
-				sort.Slice(filteredPriors, func(i, j int) bool {
-					return filteredPriors[i].ID < filteredPriors[j].ID
-				})
-
-				for i := range filteredPriors {
-					if remainingPaymentToAllocate <= 0 {
-						break
-					}
-					allocAmount := math.Min(remainingPaymentToAllocate, filteredPriors[i].RemainingAmount)
-					remainingPaymentToAllocate -= allocAmount
-					filteredPriors[i].PaidAmount += allocAmount
-					filteredPriors[i].RemainingAmount = math.Round((filteredPriors[i].TotalDue - filteredPriors[i].PaidAmount) * 100) / 100
-					if filteredPriors[i].RemainingAmount <= 0 {
-						filteredPriors[i].Status = "Paid"
-					} else {
-						filteredPriors[i].Status = "Partially_Paid"
-					}
-					_ = tx.Save(&filteredPriors[i])
-
-					alloc := models.PaymentAllocation{
-						PaymentID:       payment.ID,
-						InvoiceID:       filteredPriors[i].ID,
-						AmountAllocated: allocAmount,
-						CreatedAt:       &now,
-					}
-					_ = tx.Create(&alloc)
-					allocations = append(allocations, alloc)
-				}
-			}
+			// تم إيقاف التوزيع المخفي على الفواتير القديمة إذا اختار المستخدم فاتورة محددة للسداد
+			// وذلك لأن الفاتورة المحددة تحمل متأخرات الفواتير القديمة بداخلها (Cumulative)
+			// وتوزيع المبلغ على الفواتير القديمة كان يسبب تصفير المتأخرات وتشويه إجمالي الفاتورة الحالية في واجهة المستخدم.
 
 			// 2. Apply payment directly and fully to target invoice
 			if remainingPaymentToAllocate > 0 {

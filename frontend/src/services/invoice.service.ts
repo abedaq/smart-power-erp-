@@ -1,5 +1,20 @@
 import api from '../lib/api';
 
+export const getInvoiceCycles = async (): Promise<string[]> => {
+  try {
+    const res = await api.get('/invoices/cycles');
+    if (res.data?.success && Array.isArray(res.data.data)) {
+      return res.data.data;
+    }
+    if (Array.isArray(res.data?.cycles)) {
+      return res.data.cycles;
+    }
+  } catch (err: any) {
+    console.warn('Failed to load invoice cycles:', err?.message);
+  }
+  return [];
+};
+
 export const getInvoices = async (page = 1, limit = 1000, route = 'all', region = 'all', cycle = 'all') => {
   try {
     const res = await api.get('/invoices', {
@@ -45,6 +60,9 @@ export const payInvoice = async (id: number, amount_paid: number, accountant_nam
   }
 };
 
+export const sendBulkInvoicesWhatsApp = (ids: number[]) =>
+  api.post('/whatsapp/send-bulk-invoices', { ids }).then(res => res.data);
+
 export const sendInvoiceWhatsApp = (invoiceId: number) =>
   api.post('/whatsapp/send-invoice', { invoice_id: invoiceId }).then(res => res.data);
 
@@ -53,3 +71,8 @@ export const sendDisconnectionWarning = (customerId: number, amount: number) =>
 
 export const sendBulkDisconnectionWarnings = (items: Array<{ customer_id: number; amount: number }>) =>
   api.post('/whatsapp/send-bulk-warnings', { items }).then(res => res.data);
+
+export const generateNextCycleApi = async (currentCycle: string) => {
+  const res = await api.post('/invoices/generate-next-cycle', { current_cycle: currentCycle });
+  return res.data;
+};

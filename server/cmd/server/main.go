@@ -648,6 +648,7 @@ func main() {
 	// Invoices & Billing routes
 	api.Get("/invoices", h.GetInvoices)
 	api.Get("/invoices/cycles", h.GetBillingCycles)
+	api.Post("/invoices/generate-next-cycle", middleware.AuthRequired(authService), h.GenerateNextCycle)
 	api.Get("/invoices/:id", h.GetInvoice)
 	api.Get("/invoices/:id/render", h.RenderInvoice)
 	api.Put("/invoices/:id/cell-update", middleware.AuthRequired(authService), h.UpdateGridCell)
@@ -666,6 +667,7 @@ func main() {
 	api.Post("/whatsapp/restart", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.RestartWhatsApp)
 	api.Post("/whatsapp/logout", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.LogoutWhatsApp)
 	api.Post("/whatsapp/connect", middleware.AuthRequired(authService), middleware.RequireRole("ADMIN"), h.ConnectWhatsApp)
+	api.Post("/whatsapp/send-bulk-invoices", middleware.AuthRequired(authService), h.SendBulkInvoicesWhatsApp)
 	api.Post("/whatsapp/send-invoice", middleware.AuthRequired(authService), h.SendInvoiceWhatsApp)
 	api.Post("/whatsapp/send-warning", middleware.AuthRequired(authService), h.SendWarningWhatsApp)
 	api.Post("/whatsapp/send-bulk-warnings", middleware.AuthRequired(authService), h.SendBulkWarningsWhatsApp)
@@ -779,7 +781,7 @@ func main() {
 			Root:         embeddedFS,
 			Index:        "index.html",
 			NotFoundFile: "index.html", // SPA client-side router fallback
-			MaxAge:       3600,
+			MaxAge:       0,
 		}))
 	}
 
@@ -919,17 +921,8 @@ func openNativeWindow(url string, onWindowClose func()) {
 		_ = os.MkdirAll(profileDir, 0755)
 
 		// 1. Direct Embedded Win32 WebView2
-		w := webview2.NewWithOptions(webview2.WebViewOptions{
-			Debug:     false,
-			DataPath:  profileDir,
-			AutoFocus: true,
-			WindowOptions: webview2.WindowOptions{
-				Title:  "SmartPower ERP",
-				Width:  1440,
-				Height: 900,
-				Center: true,
-			},
-		})
+		// WebView2 bypassed to prevent crash on Admin mode
+		var w webview2.WebView = nil
 
 		if w != nil {
 			defer w.Destroy()

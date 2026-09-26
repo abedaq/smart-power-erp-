@@ -570,3 +570,167 @@ func (s *BillingService) DeduplicateInvoices() error {
 	log.Printf("✅ [DeduplicateInvoices] Deduplicated invoices: merged %d duplicate groups across %d total groups", mergedGroups, len(groups))
 	return nil
 }
+
+// GenerateNextCycle rolls over the specified cycle (e.g. "سبتمبر 1") into the subsequent cycle (e.g. "سبتمبر 2").
+// It creates fresh invoices for all active customers with:
+// - previous_reading = current_reading from the previous cycle
+// - current_reading = previous_reading (consumption = 0 until recorded)
+// - arrears = remaining_amount from the previous cycle invoice
+// - total_due = fixed_fee_snapshot + arrears
+// - paid_amount = 0, remaining_amount = total_due
+func (s *BillingService) GenerateNextCycle(fromCycle string) (string, int, error) {
+	fromCanonical := FormatCanonicalCycle(fromCycle)
+	if fromCanonical == "" {
+		fromCanonical = "سبتمبر 1"
+	}
+	targetCycle := GetNextCycleName(fromCanonical)
+
+	// 1. Fetch all active customers with their subscription plan
+	var customers []models.Customer
+	if err := s.db.Preload("SubscriptionPlan").Where("is_deleted = false").Order("sort_order ASC, id ASC").Find(&customers).Error; err != nil {
+		return "", 0, fmt.Errorf("فشل في استرجاع بيانات المشتركين: %w", err)
+	}
+
+	if len(customers) == 0 {
+		return "", 0, fmt.Errorf("لا يوجد مشتركين نشطين في النظام")
+	}
+
+	// 2. Fetch existing invoices for the previous cycle
+	aliases := getCycleAliases(fromCanonical)
+	var prevInvoices []models.Invoice
+	if len(aliases) > 0 {
+		s.db.Where("billing_cycle IN ?", aliases).Find(&prevInvoices)
+	} else {
+		s.db.Where("billing_cycle = ?", fromCanonical).Find(&prevInvoices)
+	}
+
+	prevInvMap := make(map[int64]models.Invoice)
+	for _, inv := range prevInvoices {
+		if inv.CustomerID != nil {
+			prevInvMap[*inv.CustomerID] = inv
+		}
+	}
+
+	// 3. Fetch existing invoices for target cycle to avoid duplication
+	targetAliases := getCycleAliases(targetCycle)
+	var existingTargetInvoices []models.Invoice
+	if len(targetAliases) > 0 {
+		s.db.Where("billing_cycle IN ?", targetAliases).Find(&existingTargetInvoices)
+	} else {
+		s.db.Where("billing_cycle = ?", targetCycle).Find(&existingTargetInvoices)
+	}
+
+	existingTargetMap := make(map[int64]models.Invoice)
+	for _, inv := range existingTargetInvoices {
+		if inv.CustomerID != nil {
+			existingTargetMap[*inv.CustomerID] = inv
+		}
+	}
+
+	// 4. Perform atomic batch creation / update
+	createdCount := 0
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		for _, cust := range customers {
+			// Check if target invoice already exists
+			if _, exists := existingTargetMap[cust.ID]; exists {
+				continue
+			}
+
+			prevInv, hasPrev := prevInvMap[cust.ID]
+			var prevReading float64 = 0
+			var arrears float64 = 0
+
+			if hasPrev {
+				if prevInv.CurrentReading > 0 {
+					prevReading = prevInv.CurrentReading
+				} else if prevInv.PreviousReading > 0 {
+					prevReading = prevInv.PreviousReading
+				} else {
+					prevReading = cust.InitialReading
+				}
+				arrears = prevInv.RemainingAmount
+			} else {
+				prevReading = cust.InitialReading
+				arrears = cust.Balance
+			}
+
+			// Plan details
+			rate := 1500.0
+			fee := 1000.0
+			if cust.SubscriptionPlan != nil {
+				if cust.SubscriptionPlan.KwhPrice > 0 {
+					rate = cust.SubscriptionPlan.KwhPrice
+				}
+				if cust.SubscriptionPlan.FixedFee > 0 {
+					fee = cust.SubscriptionPlan.FixedFee
+				}
+			}
+
+			// Financial fields
+			totalAmount := fee
+			totalDue := math.Round((fee+arrears)*100) / 100
+			remainingAmount := totalDue
+
+			invNum := fmt.Sprintf("INV-%s-%s", strings.ReplaceAll(targetCycle, " ", "-"), cust.SubscriberNumber)
+
+			custID := cust.ID
+			billingCycleStr := targetCycle
+			now := time.Now()
+			dueDate := now.AddDate(0, 0, 15)
+
+			newInvoice := models.Invoice{
+				CustomerID:       &custID,
+				InvoiceNumber:    &invNum,
+				BillingCycle:     &billingCycleStr,
+				PreviousReading:  prevReading,
+				CurrentReading:   prevReading,
+				Consumption:      0,
+				ConsumptionValue: 0,
+				KwhPriceSnapshot: rate,
+				FixedFeeSnapshot: fee,
+				Arrears:          arrears,
+				TotalAmount:      totalAmount,
+				TotalDue:         totalDue,
+				PaidAmount:       0,
+				RemainingAmount:  remainingAmount,
+				DueDate:          dueDate,
+				ApprovalStatus:   "PENDING",
+				Status:           "Unpaid",
+				CreatedAt:        &now,
+				UpdatedAt:        &now,
+			}
+
+			if err := tx.Create(&newInvoice).Error; err != nil {
+				return fmt.Errorf("فشل في إنشاء فاتورة للمشترك %s: %w", cust.SubscriberNumber, err)
+			}
+			createdCount++
+		}
+
+		// Ensure target billing cycle exists in billing_cycles table
+		var bcCount int64
+		tx.Table("billing_cycles").Where("code = ?", targetCycle).Count(&bcCount)
+		if bcCount == 0 {
+			now := time.Now()
+			newBC := map[string]interface{}{
+				"code":       targetCycle,
+				"name":       fmt.Sprintf("دورة %s", targetCycle),
+				"start_date": now.Format("2006-01-02"),
+				"end_date":   now.AddDate(0, 0, 15).Format("2006-01-02"),
+				"due_date":   now.AddDate(0, 0, 20).Format("2006-01-02"),
+				"status":     "OPEN",
+				"created_at": now,
+				"updated_at": now,
+			}
+			_ = tx.Table("billing_cycles").Create(&newBC).Error
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return "", 0, err
+	}
+
+	log.Printf("🎉 [GenerateNextCycle] Generated next cycle %s with %d invoices (from %s)", targetCycle, createdCount, fromCanonical)
+	return targetCycle, createdCount, nil
+}

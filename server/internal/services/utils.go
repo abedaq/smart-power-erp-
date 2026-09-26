@@ -188,6 +188,38 @@ func FormatCanonicalCycle(cycleStr string) string {
 	return fmt.Sprintf("%s %d - %d", mName, cycleNum, year)
 }
 
+// GetNextCycleName calculates the subsequent billing cycle name (e.g. "سبتمبر 1" -> "سبتمبر 2", "سبتمبر 2" -> "أكتوبر 1")
+func GetNextCycleName(cycleStr string) string {
+	idx := GetCycleSortIndex(cycleStr)
+	if idx <= 0 {
+		return "سبتمبر 2"
+	}
+	nextIdx := idx + 1
+	year := nextIdx / 24
+	rem := nextIdx % 24
+	if rem == 0 {
+		year--
+		rem = 24
+	}
+	cycleNum := 1
+	if rem%2 == 0 {
+		cycleNum = 2
+	}
+	monthIdx := ((rem - cycleNum) / 2) + 1
+	arabicMonths := []string{
+		"", "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو",
+		"يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر",
+	}
+	mName := "سبتمبر"
+	if monthIdx >= 1 && monthIdx <= 12 {
+		mName = arabicMonths[monthIdx]
+	}
+	if year == 2026 {
+		return fmt.Sprintf("%s %d", mName, cycleNum)
+	}
+	return fmt.Sprintf("%s %d - %d", mName, cycleNum, year)
+}
+
 // SafeGo runs a function in a new goroutine with panic recovery and logging.
 func SafeGo(name string, fn func()) {
 	SafeGoWithRecovery(name, fn, nil)

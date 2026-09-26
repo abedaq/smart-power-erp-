@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import {
   Search,
+  X,
   Send,
   Eye,
   Trash2,
@@ -55,6 +56,9 @@ export interface ExcelGridProps {
   onPreviewInvoice?: (row: ComputedGridRow) => void;
   exportFilenamePrefix?: string;
   emptyMessage?: string;
+  enableRowSelection?: boolean;
+  selectedRowIds?: number[];
+  onSelectionChange?: (selectedIds: number[]) => void;
 }
 
 export const ExcelGrid: React.FC<ExcelGridProps> = ({
@@ -75,10 +79,15 @@ export const ExcelGrid: React.FC<ExcelGridProps> = ({
   hideActionsColumn = false,
   onPreviewInvoice,
   emptyMessage = 'لا توجد سجلات مطابقة للبحث أو الفلترة المحددة.',
+  enableRowSelection = false,
+  selectedRowIds = [],
+  onSelectionChange,
 }) => {
   // Local state for optimistic live editing
   const [localRows, setLocalRows] = useState<GridRowData[]>(initialRows);
   const [searchQuery, setSearchQuery] = useState('');
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const searchInputRef = React.useRef<HTMLInputElement>(null);
 
   // Unlocked historical cycles in this session
   const [unlockedPeriods, setUnlockedPeriods] = useState<Set<string>>(new Set());
@@ -191,6 +200,24 @@ export const ExcelGrid: React.FC<ExcelGridProps> = ({
   const totals: GridFooterTotals = useMemo(() => {
     return computeGridTotals(filteredRows);
   }, [filteredRows]);
+
+  const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!onSelectionChange) return;
+    if (e.target.checked) {
+      onSelectionChange(filteredRows.map(r => r.id));
+    } else {
+      onSelectionChange([]);
+    }
+  };
+
+  const handleSelectRow = (id: number, checked: boolean) => {
+    if (!onSelectionChange) return;
+    if (checked) {
+      onSelectionChange([...selectedRowIds, id]);
+    } else {
+      onSelectionChange(selectedRowIds.filter(rowId => rowId !== id));
+    }
+  };
 
   // Helper to compare values strictly
   const areValuesEqual = (val1: any, val2: any): boolean => {
@@ -382,16 +409,50 @@ export const ExcelGrid: React.FC<ExcelGridProps> = ({
 
       {/* 3. Search Bar & Cycle Tabs Toolbar */}
       <div className="flex flex-col lg:flex-row items-center justify-between gap-3 bg-white p-2.5 rounded-xl border border-slate-200 shadow-sm">
-        <div className="relative w-full lg:w-72 shrink-0">
-          <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            placeholder="بحث باسم المشترك، رقم الاشتراك، رقم العداد أو الهاتف..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full bg-slate-50 border border-slate-200 rounded-lg pr-9 pl-3 py-1.5 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:border-purple-600 focus:bg-white transition-colors font-medium"
-          />
-        </div>
+        {/* Icon-Only Click-to-Expand Enterprise Search Bar */}
+        {!isSearchOpen && !searchQuery ? (
+          <button
+            type="button"
+            onClick={() => {
+              setIsSearchOpen(true);
+              setTimeout(() => searchInputRef.current?.focus(), 50);
+            }}
+            className="p-2 px-3 bg-slate-100 hover:bg-purple-50 text-slate-700 hover:text-purple-700 rounded-xl transition-all duration-300 cursor-pointer border border-slate-200/90 shadow-2xs flex items-center gap-1.5 shrink-0"
+            title="انقر لفتح البحث..."
+          >
+            <Search className="w-4 h-4 text-purple-600" />
+            <span className="text-xs font-bold">بحث...</span>
+          </button>
+        ) : (
+          <div className="relative flex items-center w-full lg:w-96 transition-all duration-300 ease-in-out">
+            <Search className="w-4 h-4 text-purple-600 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              ref={searchInputRef}
+              type="text"
+              placeholder="بحث باسم المشترك، رقم الاشتراك، رقم العداد أو الهاتف..."
+              value={searchQuery}
+              onBlur={() => {
+                if (!searchQuery.trim()) {
+                  setIsSearchOpen(false);
+                }
+              }}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full bg-white border-2 border-purple-500 rounded-xl pr-9 pl-8 py-1.5 text-xs text-slate-800 placeholder-slate-400 focus:outline-none shadow-md font-medium"
+              autoFocus
+            />
+            <button
+              type="button"
+              onClick={() => {
+                setSearchQuery('');
+                setIsSearchOpen(false);
+              }}
+              className="absolute left-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+              title="إغلاق البحث"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
 
         <div className="flex items-center gap-2 w-full lg:w-auto overflow-x-auto justify-start lg:justify-end">
           {extraFilterControls}
@@ -455,6 +516,17 @@ export const ExcelGrid: React.FC<ExcelGridProps> = ({
                     الإرسال والاعتماد
                   </th>
                 )}
+                  {enableRowSelection && (
+                    <th className="py-3 px-2 w-10 text-center bg-purple-100 text-purple-950 font-black border-b-2 border-purple-400 sticky left-0 z-20">
+                      <input 
+                        type="checkbox" 
+                        className="w-4 h-4 cursor-pointer accent-purple-600 rounded"
+                        checked={filteredRows.length > 0 && selectedRowIds.length === filteredRows.length}
+                        onChange={handleSelectAll}
+                        title="تحديد الكل"
+                      />
+                    </th>
+                  )}
               </tr>
             </thead>
 
@@ -842,6 +914,17 @@ export const ExcelGrid: React.FC<ExcelGridProps> = ({
                           </div>
                         </td>
                       )}
+                        {/* Row Selection Checkbox (End Position - Far Left in RTL) */}
+                        {enableRowSelection && (
+                          <td className="py-2 px-1 text-center bg-purple-50/50 sticky left-0 z-10 border-l border-slate-200">
+                            <input 
+                              type="checkbox" 
+                              className="w-4 h-4 cursor-pointer accent-purple-600 rounded"
+                              checked={selectedRowIds.includes(row.id)}
+                              onChange={(e) => handleSelectRow(row.id, e.target.checked)}
+                            />
+                          </td>
+                        )}
                     </tr>
                   );
                 })
@@ -886,6 +969,7 @@ export const ExcelGrid: React.FC<ExcelGridProps> = ({
                   if (!hideActionsColumn && extraRowActions) trailingCols++;
                   if (!hideDeleteColumn) trailingCols++;
                   if (actionColumnPosition === 'end') trailingCols++;
+                    if (enableRowSelection) trailingCols++;
                   return trailingCols > 0 ? <td colSpan={trailingCols}></td> : null;
                 })()}
               </tr>

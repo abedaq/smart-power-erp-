@@ -14,7 +14,7 @@ import (
 )
 
 // Version holds the current release version string
-var Version = "v3.4.5.7"
+var Version = "v4.0.0-PRO"
 
 type Config struct {
 	Port            string
@@ -26,6 +26,7 @@ type Config struct {
 	FrontendDist    string
 	SupabaseURL     string
 	SupabaseAnonKey string
+	EnableCloudSync bool
 }
 
 func LoadConfig() *Config {
@@ -88,6 +89,7 @@ func LoadConfig() *Config {
 		FrontendDist:    frontendDist,
 		SupabaseURL:     supaURL,
 		SupabaseAnonKey: supaAnonKey,
+		EnableCloudSync: os.Getenv("ENABLE_CLOUD_SYNC") == "true",
 	}
 }
 

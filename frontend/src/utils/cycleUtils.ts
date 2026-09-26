@@ -156,39 +156,30 @@ export function getUniqueCyclesFromInvoices(invoices: Invoice[]): CycleOption[] 
   const result: CycleOption[] = [];
   const processedLabels = new Set<string>();
 
-  // 1. Build 2026 series (starting from August)
-  standardMonths.forEach((m) => {
-    if (m.idx >= 8) {
-      [1, 2].forEach((cycleNum) => {
-        const label = `${m.name} ${cycleNum}`;
-        const count = map.get(label) || 0;
-        processedLabels.add(normalizeMonth(label));
-        result.push({
-          code: `2026-${String(m.idx).padStart(2, '0')}-${cycleNum}`,
-          label,
-          count,
-          year: 2026,
-          monthIndex: m.idx,
-          cycleNum,
-        });
-      });
-    }
-  });
+  // Create CycleOption objects ONLY for cycles that actually exist in the invoices
+  map.forEach((count, label) => {
+    // Attempt to parse the month and year from the label to create the code and sort info
+    let monthIndex = 1;
+    let cycleNum = 1;
+    let year = 2026;
 
-  // 2. Build 2027 series (January through December)
-  standardMonths.forEach((m) => {
-    [1, 2].forEach((cycleNum) => {
-      const label = `${m.name} ${cycleNum} - 2027`;
-      const count = map.get(label) || map.get(`${m.name} ${cycleNum} - 2027`) || 0;
-      processedLabels.add(normalizeMonth(label));
-      result.push({
-        code: `2027-${String(m.idx).padStart(2, '0')}-${cycleNum}`,
-        label,
-        count,
-        year: 2027,
-        monthIndex: m.idx,
-        cycleNum,
-      });
+    const match = label.match(/^([\u0600-\u06FF]+)\s+([12])(?:\s*-\s*(\d{4}))?/);
+    if (match) {
+      const mName = normalizeMonth(match[1]);
+      const found = standardMonths.find(m => normalizeMonth(m.name) === mName);
+      if (found) monthIndex = found.idx;
+      cycleNum = parseInt(match[2], 10);
+      if (match[3]) year = parseInt(match[3], 10);
+    }
+
+    processedLabels.add(normalizeMonth(label));
+    result.push({
+      code: `${year}-${String(monthIndex).padStart(2, '0')}-${cycleNum}`,
+      label,
+      count,
+      year,
+      monthIndex,
+      cycleNum,
     });
   });
 
@@ -278,5 +269,68 @@ export function isHistoricalBillingCycle(
   // Cycles from اغسطس 1 and older are historical
   return true;
 }
+
+/**
+ * Returns the latest active billing cycle with invoices, or defaults to current date cycle.
+ * Ignores empty future cycles (e.g. 2027) unless no other cycles exist.
+ */
+export function getLatestActiveCycle(cycles: CycleOption[]): string {
+  if (!cycles || cycles.length === 0) return formatCycleName(new Date());
+
+  const currentYear = new Date().getFullYear();
+  // Filter out future test cycles (e.g. 2027) that have 0 invoices if valid current/past cycles exist
+  const validCycles = cycles.filter(c => (c.year || 2026) <= currentYear || c.count > 0);
+  const pool = validCycles.length > 0 ? validCycles : cycles;
+
+  const withCount = pool.filter(c => c.count > 0);
+  const candidates = withCount.length > 0 ? withCount : pool;
+
+  const sorted = [...candidates].sort((a, b) => {
+    const sortA = ((a.year || 2026) * 24) + (((a.monthIndex || 1) - 1) * 2) + (a.cycleNum || 1);
+    const sortB = ((b.year || 2026) * 24) + (((b.monthIndex || 1) - 1) * 2) + (b.cycleNum || 1);
+    return sortB - sortA;
+  });
+
+  return sorted[0]?.label || formatCycleName(new Date());
+}
+
+/**
+ * Calculates the next consecutive billing cycle label.
+ * e.g. "سبتمبر 1" -> "سبتمبر 2", "سبتمبر 2" -> "أكتوبر 1"
+ */
+export function getNextCycleLabel(currentCycle: string): string {
+  const standardMonths = [
+    'يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو',
+    'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'
+  ];
+  
+  const fmt = formatCycleName(currentCycle);
+  const match = fmt.match(/^([\u0600-\u06FF]+)\s+([12])(?:\s*-\s*(\d{4}))?/);
+  if (!match) return 'سبتمبر 2';
+
+  const monthName = match[1].trim();
+  const cycleNum = parseInt(match[2], 10);
+  const year = match[3] ? parseInt(match[3], 10) : 2026;
+
+  let nextMonthName = monthName;
+  let nextCycleNum = cycleNum === 1 ? 2 : 1;
+  let nextYear = year;
+
+  if (cycleNum === 2) {
+    const mIdx = standardMonths.findIndex(m => normalizeMonth(m) === normalizeMonth(monthName));
+    if (mIdx === -1 || mIdx === 11) {
+      nextMonthName = standardMonths[0]; // يناير
+      nextYear = year + 1;
+    } else {
+      nextMonthName = standardMonths[mIdx + 1];
+    }
+  }
+
+  if (nextYear !== 2026) {
+    return `${nextMonthName} ${nextCycleNum} - ${nextYear}`;
+  }
+  return `${nextMonthName} ${nextCycleNum}`;
+}
+
 
 

@@ -29,6 +29,7 @@ export const PaymentReceiptModal: React.FC<PaymentReceiptModalProps> = ({
   });
 
   if (!isOpen || !payment) return null;
+  const isReversed = payment.approval_status === 'REVERSED' || Boolean((payment as any).reversed) || Boolean((payment as any).is_reversed);
 
   const stationName =
     settings?.station_name && settings.station_name !== 'محطة الطاقة الذكية'
@@ -197,9 +198,21 @@ o سعر الكيلوواط/ ساعة ${planPrice.toLocaleString('en-US')} ري�
         <div className="p-4 overflow-y-auto flex-1 text-right">
           <div
             id="printable-official-invoice-grid"
-            className="bg-white text-black font-sans mx-auto w-full max-w-[960px] text-right leading-tight text-xs p-1"
+            className="bg-white text-black font-sans mx-auto w-full max-w-[960px] text-right leading-tight text-xs p-1 relative overflow-hidden"
             dir="rtl"
           >
+            {isReversed && (
+              <div className="bg-rose-100 border-2 border-rose-600 text-rose-950 p-2 text-center font-black text-sm mb-2 rounded-lg print:border-rose-800">
+                ⚠️ تنبيه رقابي: هذا السند ملغي مالياً ورسمياً (REVERSED / VOID) ولن يعتد به في التسويات ⚠️
+              </div>
+            )}
+            {isReversed && (
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-25 z-50 select-none">
+                <span className="text-red-600 text-7xl font-black transform -rotate-45 border-8 border-red-600 px-8 py-3 rounded-3xl tracking-widest uppercase">
+                  سند ملغي - VOID
+                </span>
+              </div>
+            )}
             {/* Outer Thick Black Frame */}
             <div className="border-2 border-black p-2">
               {/* 2-Part Grid: Right = Collector Coupon (col-span-5), Left = Main Invoice (col-span-7) */}

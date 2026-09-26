@@ -1,6 +1,6 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { getInvoices, sendInvoiceWhatsApp, sendDisconnectionWarning } from '../services/invoice.service';
+import { getInvoices, getInvoiceCycles, sendInvoiceWhatsApp, sendBulkInvoicesWhatsApp, sendDisconnectionWarning, generateNextCycleApi } from '../services/invoice.service';
 import { getPayments, sendReceiptWhatsAppApi, reversePaymentApi } from '../services/payment.service';
 import { getUniqueRoutes } from '../services/customer.service';
 import { getSettings } from '../services/settings.service';
@@ -12,12 +12,17 @@ import { StatementModal } from '../components/StatementModal';
 import { CyclePrintView } from '../components/CyclePrintView';
 import { PaymentReceiptModal } from '../components/PaymentReceiptModal';
 import { AddCustomerModal } from '../components/AddCustomerModal';
+import { BulkWhatsAppModal } from '../components/BulkWhatsAppModal';
 import { ExcelGrid } from '../components/common/ExcelGrid';
 import {
   formatCycleName,
+  type CycleOption,
   getUniqueCyclesFromInvoices,
   isHistoricalBillingCycle,
   isSameCycle,
+  getLatestActiveCycle,
+  getNextCycleLabel,
+  normalizeMonth,
 } from '../utils/cycleUtils';
 import { getNormalizedArea } from '../utils/areaGrouping';
 import {
@@ -93,7 +98,7 @@ const ExcelSheetTabs: React.FC<ExcelSheetTabsProps> = ({
   };
 
   return (
-    <div className="flex items-center gap-1 bg-white p-1 rounded-xl shadow-xs border border-slate-200/90 max-w-full overflow-hidden select-none">
+    <div dir="rtl" className="flex items-center gap-1 bg-white p-1 rounded-xl shadow-xs border border-slate-200/90 max-w-full overflow-hidden select-none grow flex-1 transition-all duration-300 ease-in-out">
       {/* Scroll Left Button */}
       <button
         type="button"
@@ -111,7 +116,8 @@ const ExcelSheetTabs: React.FC<ExcelSheetTabsProps> = ({
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUpOrLeave}
         onMouseLeave={handleMouseUpOrLeave}
-        className={`flex items-center gap-1.5 overflow-x-auto select-none [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] ${
+        dir="rtl"
+        className={`flex items-center gap-1.5 overflow-x-auto select-none grow flex-1 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] transition-all duration-300 ease-in-out ${
           isMouseDown ? 'cursor-grabbing' : 'cursor-grab'
         }`}
       >
@@ -128,7 +134,7 @@ const ExcelSheetTabs: React.FC<ExcelSheetTabsProps> = ({
               onClick={() => {
                 if (!dragMoved) onSelectCycle(c.label);
               }}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-all flex items-center gap-1.5 shrink-0 border cursor-pointer ${
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-all flex items-center justify-center gap-1.5 grow flex-1 min-w-[120px] border cursor-pointer ${
                 isSelected
                   ? 'bg-emerald-600 text-white shadow-sm font-extrabold ring-1 ring-emerald-500 border-emerald-600'
                   : 'bg-slate-50 text-slate-700 hover:bg-slate-100 hover:text-slate-900 border-slate-200'
@@ -173,7 +179,10 @@ const Invoices: React.FC = () => {
   const [selectedRoute, setSelectedRoute] = useState('all');
   const [selectedStatus, setSelectedStatus] = useState('all');
 
-  const [selectedCycleLabel, setSelectedCycleLabel] = useState<string>('أغسطس 2');
+  const hasUserSelectedCycleRef = useRef(false);
+  const [selectedCycleLabel, setSelectedCycleLabel] = useState<string>('سبتمبر 1');
+  const [isGeneratingNextCycle, setIsGeneratingNextCycle] = useState(false);
+
   const [showCyclePrintModal, setShowCyclePrintModal] = useState<boolean>(false);
   const [cyclePrintMode, setCyclePrintMode] = useState<'summary' | 'individual'>('summary');
 
@@ -192,6 +201,28 @@ const Invoices: React.FC = () => {
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [selectedCustomerForAction, setSelectedCustomerForAction] = useState<Customer | null>(null);
   const [isAddCustomerOpen, setIsAddCustomerOpen] = useState(false);
+
+  const [selectedRowIds, setSelectedRowIds] = useState<number[]>([]);
+  const [showBulkWhatsAppModal, setShowBulkWhatsAppModal] = useState(false);
+  const [isBulkSending, setIsBulkSending] = useState(false);
+  const [bulkSentCount] = useState(0);
+
+  const handleStartBulkSend = async () => {
+    if (selectedRowIds.length === 0) return;
+    setIsBulkSending(true);
+    const toastId = toast.loading('جاري إدراج ' + selectedRowIds.length + ' فاتورة في طابور الواتساب...');
+    try {
+      const res = await sendBulkInvoicesWhatsApp(selectedRowIds);
+      toast.success(res?.message || ('تم إدراج ' + selectedRowIds.length + ' فاتورة في طابور الواتساب بنجاح!'), { id: toastId, duration: 4000 });
+      setSelectedRowIds([]);
+      setShowBulkWhatsAppModal(false);
+    } catch (error: any) {
+      toast.error(error?.response?.data?.message || 'حدث خطأ أثناء إدراج الفواتير في الطابور', { id: toastId, duration: 5000 });
+    } finally {
+      setIsBulkSending(false);
+    }
+  };
+
   const [sentInvoiceIds, setSentInvoiceIds] = useState<Set<number>>(new Set());
   const [printedInvoiceIds, setPrintedInvoiceIds] = useState<Set<number>>(new Set());
 
@@ -244,18 +275,106 @@ const Invoices: React.FC = () => {
     placeholderData: (prev: any) => prev,
   });
 
-  const { data: allInvoicesData } = useQuery({
-    queryKey: ['all-invoices-cycles'],
-    queryFn: () => getInvoices(1, 10000, 'all', 'all', 'all'),
-    staleTime: 10 * 1000,
-    refetchOnWindowFocus: true,
-  });
+    const { data: fetchedCycles } = useQuery({
+      queryKey: ['all-invoices-cycles'],
+      queryFn: getInvoiceCycles,
+      staleTime: 60 * 1000,
+      refetchOnWindowFocus: true,
+    });
 
-  const rawInvoices: Invoice[] = useMemo(() => invoicesData?.data || [], [invoicesData?.data]);
-  const allRawInvoices: Invoice[] = useMemo(() => allInvoicesData?.data || rawInvoices, [allInvoicesData?.data, rawInvoices]);
+    const rawInvoices: Invoice[] = useMemo(() => invoicesData?.data || [], [invoicesData?.data]);
 
-  // Unique 15-day cycle options
-  const uniqueCycles = useMemo(() => getUniqueCyclesFromInvoices(allRawInvoices), [allRawInvoices]);
+    // Unique 15-day cycle options (Sorted newest-first so in RTL layout the latest cycle is on the right)
+    const uniqueCycles: CycleOption[] = useMemo(() => {
+      let list: CycleOption[] = [];
+      if (Array.isArray(fetchedCycles) && fetchedCycles.length > 0) {
+        const standardMonths = [
+          'يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو',
+          'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'
+        ];
+        list = fetchedCycles.map((c: any) => {
+          const label = typeof c === 'string' ? c : c.label || c.code;
+          let monthIndex = 1;
+          let cycleNum = 1;
+          let year = 2026;
+          const match = label.match(/^([\u0600-\u06FF]+)\s+([12])(?:\s*-\s*(\d{4}))?/);
+          if (match) {
+            const mName = normalizeMonth(match[1]);
+            const found = standardMonths.find(m => normalizeMonth(m) === mName);
+            if (found) monthIndex = standardMonths.indexOf(found) + 1;
+            cycleNum = parseInt(match[2], 10);
+            if (match[3]) year = parseInt(match[3], 10);
+          }
+          return {
+            code: label,
+            label,
+            count: typeof c === 'object' && typeof c.count === 'number' ? c.count : 0,
+            year,
+            monthIndex,
+            cycleNum,
+          };
+        });
+      } else {
+        list = getUniqueCyclesFromInvoices(rawInvoices);
+      }
+
+      const currentYear = new Date().getFullYear();
+      // Exclude empty future test cycles (e.g. 2027 with 0 invoices)
+      const validCycles = list.filter(c => (c.year || 2026) <= currentYear || c.count > 0);
+      const pool = validCycles.length > 0 ? validCycles : list;
+
+      // Sort newest-first (sortB - sortA) so in RTL flexbox the newest cycle renders at the right-most tab
+      return pool.sort((a, b) => {
+        const sortA = ((a.year || 2026) * 24) + (((a.monthIndex || 1) - 1) * 2) + (a.cycleNum || 1);
+        const sortB = ((b.year || 2026) * 24) + (((b.monthIndex || 1) - 1) * 2) + (b.cycleNum || 1);
+        return sortB - sortA;
+      });
+    }, [fetchedCycles, rawInvoices]);
+
+  // Auto-select latest active cycle on initial load
+  useEffect(() => {
+    if (!hasUserSelectedCycleRef.current && uniqueCycles.length > 0) {
+      const latest = getLatestActiveCycle(uniqueCycles);
+      if (latest && latest !== selectedCycleLabel) {
+        setSelectedCycleLabel(latest);
+      }
+    }
+  }, [uniqueCycles]);
+
+  const latestActiveCycleLabel = useMemo(() => getLatestActiveCycle(uniqueCycles), [uniqueCycles]);
+  const nextCycleCandidate = useMemo(() => getNextCycleLabel(latestActiveCycleLabel), [latestActiveCycleLabel]);
+
+  const handleGenerateNextCycle = async () => {
+    const targetBase = latestActiveCycleLabel || selectedCycleLabel;
+    const confirm = window.confirm(
+      `هل أنت متأكد من ترحيل القراءات والمتأخرات وتوليد كشف الدورة التالية (${nextCycleCandidate}) من دورة (${targetBase}) لجميع المشتركين؟`
+    );
+    if (!confirm) return;
+
+    setIsGeneratingNextCycle(true);
+    const loadingToast = toast.loading(`جاري توليد كشف دورة [${nextCycleCandidate}]...`);
+    try {
+      const res = await generateNextCycleApi(targetBase);
+      toast.dismiss(loadingToast);
+      if (res?.success) {
+        toast.success(res.message || `تم توليد كشف دورة [${res.next_cycle}] بنجاح!`, { duration: 5000 });
+        await queryClient.invalidateQueries({ queryKey: ['invoices'] });
+        await queryClient.invalidateQueries({ queryKey: ['all-invoices-cycles'] });
+        await queryClient.invalidateQueries({ queryKey: ['routes'] });
+        hasUserSelectedCycleRef.current = true;
+        if (res.next_cycle) {
+          setSelectedCycleLabel(res.next_cycle);
+        }
+      } else {
+        toast.error(res?.message || 'فشل توليد كشف الدورة التالية');
+      }
+    } catch (err: any) {
+      toast.dismiss(loadingToast);
+      toast.error(err?.response?.data?.message || err.message || 'حدث خطأ أثناء توليد الدورة التالية');
+    } finally {
+      setIsGeneratingNextCycle(false);
+    }
+  };
 
   const selectedCycleInvoices = useMemo(() => {
     const list = rawInvoices.filter((inv: Invoice) => {
@@ -286,6 +405,7 @@ const Invoices: React.FC = () => {
   }, [rawInvoices, selectedCycleLabel]);
 
   const handleSelectCycle = (cycle: string) => {
+    hasUserSelectedCycleRef.current = true;
     setSelectedCycleLabel(cycle);
     setSelectedStatus('all');
     setSelectedRoute('all');
@@ -558,6 +678,9 @@ const Invoices: React.FC = () => {
           hideActionsColumn={false}
           actionColumnPosition="none"
           exportFilenamePrefix="كشف_فواتير_الدورة"
+          enableRowSelection={true}
+          selectedRowIds={selectedRowIds}
+          onSelectionChange={setSelectedRowIds}
           extraFilterControls={
             <div className="flex items-center gap-2 max-w-full overflow-x-auto select-none">
               {/* Draggable Modern Excel Sheet Tabs */}
@@ -566,6 +689,30 @@ const Invoices: React.FC = () => {
                 selectedCycle={selectedCycleLabel}
                 onSelectCycle={handleSelectCycle}
               />
+
+              {/* Bulk WhatsApp Button */}
+              {selectedRowIds.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowBulkWhatsAppModal(true)}
+                  className="flex items-center gap-1.5 bg-purple-600 hover:bg-purple-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow-xs transition-all shrink-0 cursor-pointer"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  إرسال محدد ({selectedRowIds.length})
+                </button>
+              )}
+
+              {/* Fixed Always-Visible Generate Next Cycle Button */}
+              <button
+                type="button"
+                onClick={handleGenerateNextCycle}
+                disabled={isGeneratingNextCycle}
+                className="flex items-center gap-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow-xs transition-all shrink-0 cursor-pointer disabled:opacity-50"
+                title={`توليد وترحيل كشف الدورة التالية (${nextCycleCandidate}) من دورة (${latestActiveCycleLabel})`}
+              >
+                <Calendar className="w-3.5 h-3.5" />
+                {isGeneratingNextCycle ? 'جاري التوليد...' : `➕ توليد كشف ${nextCycleCandidate}`}
+              </button>
 
               {/* Route Filter Dropdown */}
               <select
@@ -1121,6 +1268,14 @@ const Invoices: React.FC = () => {
         customer={selectedCustomerForAction}
       />
 
+      <BulkWhatsAppModal
+        isOpen={showBulkWhatsAppModal}
+        onClose={() => setShowBulkWhatsAppModal(false)}
+        selectedIds={selectedRowIds}
+        onStartBulkSend={handleStartBulkSend}
+        isSending={isBulkSending}
+        sentCount={bulkSentCount}
+      />
       <AddCustomerModal
         isOpen={isAddCustomerOpen}
         currentCycle={selectedCycleLabel}
