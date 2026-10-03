@@ -45,7 +45,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ isOpen, onClose, cus
   const stationPhone = settings?.station_phone || '783270260 _ 736955883';
   const bankAccountNum = settings?.bank_accounts || '3052001225';
 
-  const planPrice = Number((customer as any)?.unitPrice ?? (customer as any)?.unit_price ?? (customer as any)?.kwh_price ?? customer?.subscription_plan?.kwh_price ?? 1400);
+  const planPrice = Number((customer as any)?.unitPrice ?? (customer as any)?.unit_price ?? (customer as any)?.kwh_price ?? customer?.subscription_plan?.kwh_price ?? 1500);
   const planFee = Number((customer as any)?.serviceFee ?? (customer as any)?.service_fee ?? (customer as any)?.fixed_fee ?? customer?.subscription_plan?.fixed_fee ?? 1000);
 
   const defaultPolicyText = `o يتم سداد الفاتورة يوم استلامها او اليوم التالي فقط.
@@ -55,7 +55,7 @@ o يتحمل المشترك مديونية أي موظف إن لم يكن هنا
 o سعر الكيلوواط/ ساعة ${planPrice.toLocaleString('en-US')} ريال ويرتفع سعر الكيلو بنسبة وتناسب بارتفاع الديزل.`;
 
   const policyLines = (settings?.invoice_policy_text || defaultPolicyText)
-    .replace(/1400/g, planPrice.toLocaleString('en-US'))
+    .replace(/1500/g, planPrice.toLocaleString('en-US'))
     .split('\n')
     .filter((l: string) => l.trim().length > 0);
 
@@ -188,7 +188,9 @@ o سعر الكيلوواط/ ساعة ${planPrice.toLocaleString('en-US')} ري�
       consumptionCost,
       arrears,
       totalDue: invoiceTotalDue,
-      paidAmount: (lastPaymentResult as any).totalPaid ?? (previousPaidAmount + lastPaymentResult.amount),
+      currentReceiptAmount: lastPaymentResult.amount,
+      paidAmount: lastPaymentResult.amount,
+      totalPaid: (lastPaymentResult as any).totalPaid ?? (previousPaidAmount + lastPaymentResult.amount),
       remaining: lastPaymentResult.newRemaining,
       sent: false,
     };
@@ -457,8 +459,8 @@ o سعر الكيلوواط/ ساعة ${planPrice.toLocaleString('en-US')} ري�
                             <span className="font-mono text-black font-black">{Number(updatedComputedRow.totalDue || 0).toLocaleString('en-US')} ر.ي</span>
                           </div>
                           <div className="flex justify-between">
-                            <span>المبلغ المسدد:</span>
-                            <span className="font-mono text-emerald-800 font-black">{Number(updatedComputedRow.paidAmount || 0).toLocaleString('en-US')} ر.ي</span>
+                            <span>المقبوض بهذا السند:</span>
+                            <span className="font-mono text-emerald-800 font-black">{Number(lastPaymentResult.amount || 0).toLocaleString('en-US')} ر.ي</span>
                           </div>
                           <div className="flex justify-between border-t border-black/30 pt-0.5">
                             <span>{updatedComputedRow.remaining < 0 ? 'الرصيد الدائن (فائض):' : 'المتبقي بعد السداد:'}</span>
@@ -584,15 +586,21 @@ o سعر الكيلوواط/ ساعة ${planPrice.toLocaleString('en-US')} ري�
 
                         {/* Financial Settlement Breakdown Card in Main Invoice */}
                         <div className="border-2 border-black bg-slate-50 p-1.5 rounded mb-2 text-[10px] font-black">
-                          <div className="grid grid-cols-3 gap-1 text-center">
+                          <div className={`grid ${Number((lastPaymentResult as any)?.totalPaid || 0) > Number(lastPaymentResult.amount || 0) ? 'grid-cols-4' : 'grid-cols-3'} gap-1 text-center`}>
                             <div className="border-l border-black pl-1">
                               <span className="text-slate-700 block text-[9px]">إجمالي المستحق</span>
                               <span className="font-mono text-black text-[11px] font-black">{Number(updatedComputedRow.totalDue || 0).toLocaleString('en-US')} ر.ي</span>
                             </div>
                             <div className="border-l border-black pl-1">
-                              <span className="text-emerald-800 block text-[9px]">المبلغ المسدد</span>
-                              <span className="font-mono text-emerald-700 text-[11px] font-black">{Number(updatedComputedRow.paidAmount || 0).toLocaleString('en-US')} ر.ي</span>
+                              <span className="text-emerald-800 block text-[9px]">المقبوض بهذا السند</span>
+                              <span className="font-mono text-emerald-700 text-[11px] font-black">{Number(lastPaymentResult.amount || 0).toLocaleString('en-US')} ر.ي</span>
                             </div>
+                            {Number((lastPaymentResult as any)?.totalPaid || 0) > Number(lastPaymentResult.amount || 0) && (
+                              <div className="border-l border-black pl-1">
+                                <span className="text-blue-800 block text-[9px]">إجمالي المدفوع حتى الآن</span>
+                                <span className="font-mono text-blue-800 text-[11px] font-black">{Number((lastPaymentResult as any)?.totalPaid || 0).toLocaleString('en-US')} ر.ي</span>
+                              </div>
+                            )}
                             <div>
                               <span className="text-slate-700 block text-[9px]">
                                 {updatedComputedRow.remaining < 0 ? 'الرصيد الدائن (فائض)' : 'الرصيد المتبقي'}

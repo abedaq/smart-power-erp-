@@ -211,7 +211,7 @@ func (s *CustomerService) CreateCustomer(customer *models.Customer, auditCtx mod
 	}
 	_ = s.db.Create(&reading)
 
-	kwhPrice := 1400.0
+	kwhPrice := 1500.0
 	fixedFee := 1000.0
 	if customer.SubscriptionPlan != nil {
 		if customer.SubscriptionPlan.KwhPrice > 0 {
@@ -371,7 +371,7 @@ func (s *CustomerService) EnsureAllCustomersHaveActiveInvoice() error {
 			?,
 			CURRENT_DATE + INTERVAL '30 days',
 			'Unpaid',
-			COALESCE(p.kwh_price, 1400.0),
+			COALESCE(p.kwh_price, 1500.0),
 			COALESCE(p.fixed_fee, 1000.0),
 			-- القراءة السابقة: آخر قراءة معتمدة، أو قراءة التأسيس للمشترك الجديد
 			COALESCE(
@@ -634,7 +634,7 @@ func (s *CustomerService) UpdateGridCell(id int64, payload map[string]interface{
 		if hasCurrReading || hasPrevReading || hasUnitPrice || hasServiceFee || hasArrears || hasPaidAmount {
 			currReading := 0.0
 			prevReading := customer.InitialReading
-			kwhPrice := 1400.0
+			kwhPrice := 1500.0
 			fixedFee := 1000.0
 			arrears := 0.0
 			paidAmount := 0.0
@@ -790,7 +790,18 @@ func (s *CustomerService) UpdateGridCell(id int64, payload map[string]interface{
 						if downInv.CurrentReading > 0 && downInv.CurrentReading < downInv.PreviousReading {
 							downInv.CurrentReading = downInv.PreviousReading
 						}
-						downInv.Arrears = cascadeArr
+						preserveArrears := false
+						if downInv.Arrears > 0 && cascadeArr < downInv.Arrears {
+							if downInv.Status == "Paid" || downInv.RemainingAmount <= 0 || downInv.PaidAmount > 0 {
+								preserveArrears = true
+							}
+						} else if downInv.Arrears < 0 && cascadeArr >= 0 {
+							preserveArrears = true
+						}
+
+						if !preserveArrears {
+							downInv.Arrears = cascadeArr
+						}
 						downCons := 0.0
 						if downInv.CurrentReading > 0 && downInv.CurrentReading >= downInv.PreviousReading {
 							downCons = downInv.CurrentReading - downInv.PreviousReading
@@ -812,7 +823,14 @@ func (s *CustomerService) UpdateGridCell(id int64, payload map[string]interface{
 						if downInv.CurrentReading > 0 {
 							cascadePrev = downInv.CurrentReading
 						}
-						cascadeArr = downInv.RemainingAmount
+						// R3: في حال وجود دورات مستقبلية فارغة أو غير معتمدة، منع ترحيل أرصدة مشوهة
+						if downInv.ApprovalStatus == "PENDING" && downCons == 0 {
+							if cascadeArr <= 0 {
+								cascadeArr = 0
+							}
+						} else {
+							cascadeArr = downInv.RemainingAmount
+						}
 					}
 				}
 			}
@@ -934,7 +952,7 @@ func (s *CustomerService) enrichCustomersBatch(customers []models.Customer) {
 	s.db.Raw(`
 		SELECT DISTINCT ON (customer_id) *
 		FROM invoices
-		WHERE customer_id IN (?)
+		WHERE customer_id IN (?) AND approval_status != 'REJECTED'
 		ORDER BY customer_id, id DESC
 	`, customerIDs).Scan(&latestInvoices)
 
@@ -946,9 +964,20 @@ func (s *CustomerService) enrichCustomersBatch(customers []models.Customer) {
 	}
 
 	// 3. Populate arrears strictly from the latest invoice per customer (Single Source of Truth)
+	// منع ظهور مديونية اشتراك معلقة لمشترك صفى حسابه في حال وجود دورات مستقبلية فارغة أو غير معتمدة
 	arrearsMap := make(map[int64]float64, len(customerIDs))
 	for custID, inv := range latestInvoiceMap {
-		arrearsMap[custID] = inv.RemainingAmount
+		if inv.ApprovalStatus == "PENDING" && inv.Consumption == 0 && (inv.CurrentReading == 0 || inv.CurrentReading <= inv.PreviousReading) {
+			if inv.Arrears > 0 {
+				arrearsMap[custID] = inv.Arrears
+			} else {
+				arrearsMap[custID] = 0
+			}
+		} else if inv.RemainingAmount > 0 {
+			arrearsMap[custID] = inv.RemainingAmount
+		} else {
+			arrearsMap[custID] = 0
+		}
 	}
 
 	// 4. Batch fetch available credits
@@ -1007,7 +1036,7 @@ func (s *CustomerService) enrichCustomersBatch(customers []models.Customer) {
 
 func (s *CustomerService) enrichCustomerCalculations(c *models.Customer) {
 	var latestInvoice models.Invoice
-	hasInv := s.db.Where("customer_id = ?", c.ID).Order("id DESC").First(&latestInvoice).Error == nil
+	hasInv := s.db.Where("customer_id = ? AND approval_status != 'REJECTED'", c.ID).Order("id DESC").First(&latestInvoice).Error == nil
 	if hasInv {
 		invCopy := latestInvoice
 		c.LatestInvoice = &invCopy
@@ -1033,7 +1062,17 @@ func (s *CustomerService) enrichCustomerCalculations(c *models.Customer) {
 
 	remainingTotal := c.TotalDue
 	if hasInv {
-		remainingTotal = latestInvoice.RemainingAmount
+		if latestInvoice.ApprovalStatus == "PENDING" && latestInvoice.Consumption == 0 && (latestInvoice.CurrentReading == 0 || latestInvoice.CurrentReading <= latestInvoice.PreviousReading) {
+			if latestInvoice.Arrears > 0 {
+				remainingTotal = latestInvoice.Arrears
+			} else {
+				remainingTotal = 0
+			}
+		} else if latestInvoice.RemainingAmount > 0 {
+			remainingTotal = latestInvoice.RemainingAmount
+		} else {
+			remainingTotal = 0
+		}
 	}
 
 	var creditSummary struct {

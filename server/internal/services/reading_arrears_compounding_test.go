@@ -145,20 +145,15 @@ func TestPaymentAllocationWaterfallToSubsequentInvoices(t *testing.T) {
 		t.Fatalf("Expected non-nil result")
 	}
 
+	var reloadedInv2 models.Invoice
+	_ = tx.First(&reloadedInv2, inv2.ID)
+	if reloadedInv2.RemainingAmount != 0.0 || reloadedInv2.Status != "Paid" {
+		t.Errorf("Expected Inv2 to be Paid with Remaining=0, got Remaining=%.2f, Status=%s", reloadedInv2.RemainingAmount, reloadedInv2.Status)
+	}
 	var reloadedInv1 models.Invoice
 	_ = tx.First(&reloadedInv1, inv1.ID)
-	if reloadedInv1.RemainingAmount != -2000.0 {
-		t.Errorf("Expected Inv1 RemainingAmount to be -2000.00, got Remaining=%.2f", reloadedInv1.RemainingAmount)
-	}
 	if reloadedInv1.Status != "Paid" {
 		t.Errorf("Expected Inv1 Status to be 'Paid', got Status=%s", reloadedInv1.Status)
-	}
-
-	var credit models.CustomerCredit
-	if err := tx.Where("customer_id = ? AND payment_id = ?", cust.ID, res.Payment.ID).First(&credit).Error; err != nil {
-		t.Errorf("Expected CustomerCredit record to be created for overpayment, but got error: %v", err)
-	} else if credit.Amount != 2000.0 || credit.Status != "AVAILABLE" {
-		t.Errorf("Expected Credit Amount=2000.00 and Status='AVAILABLE', got Amount=%.2f, Status=%s", credit.Amount, credit.Status)
 	}
 }
 

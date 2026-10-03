@@ -44,9 +44,11 @@ func TestVerifyDatabaseCleanup(t *testing.T) {
 
 	var allCusts []models.Customer
 	db.Order("id asc").Find(&allCusts)
-	t.Logf("First customer: ID=%d, Name=%s, SubNo=%s", allCusts[0].ID, allCusts[0].FullName, allCusts[0].SubscriberNumber)
-	t.Logf("Last customer: ID=%d, Name=%s, SubNo=%s", allCusts[len(allCusts)-1].ID, allCusts[len(allCusts)-1].FullName, allCusts[len(allCusts)-1].SubscriberNumber)
-	t.Logf("Total loaded: %d", len(allCusts))
+	if len(allCusts) > 0 {
+		t.Logf("First customer: ID=%d, Name=%s, SubNo=%s", allCusts[0].ID, allCusts[0].FullName, allCusts[0].SubscriberNumber)
+		t.Logf("Last customer: ID=%d, Name=%s, SubNo=%s", allCusts[len(allCusts)-1].ID, allCusts[len(allCusts)-1].FullName, allCusts[len(allCusts)-1].SubscriberNumber)
+		t.Logf("Total loaded: %d", len(allCusts))
+	}
 
 	for _, c := range allCusts {
 		if c.ID >= 500 {

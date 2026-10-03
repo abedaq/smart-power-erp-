@@ -70,7 +70,14 @@ export function computeRowFinancials(row: GridRowData): ComputedGridRow {
 
   const totalDue = consumptionCost + serviceFee + arrears;
   const paid = parseNum(row.paidAmount);
-  const remaining = totalDue - paid;
+  let remaining = totalDue - paid;
+  if (row.rawItem && typeof row.rawItem.remaining_amount === 'number') {
+    if (totalDue < 0 && row.rawItem.remaining_amount > totalDue) {
+      remaining = row.rawItem.remaining_amount;
+    } else if (row.status === 'Paid' && remaining < 0) {
+      remaining = 0;
+    }
+  }
 
   return {
     ...row,

@@ -466,7 +466,7 @@ func (h *Handlers) GetSettings(c *fiber.Ctx) error {
 			StationName:      "محطة الضياء لتوليد الطاقة الكهربائية",
 			StationPhone:     strPtr("783270260 _ 736955883"),
 			BankAccounts:     strPtr("3052001225"),
-			DefaultKwhPrice:  1400,
+			DefaultKwhPrice:  1500,
 			DefaultFixedFee:  1000,
 			MaxOverdueDays:   10,
 			WhatsAppStatus:   "Disconnected",
@@ -1114,10 +1114,25 @@ func (h *Handlers) SendWarningWhatsApp(c *fiber.Ctx) error {
 		if amountDue <= 0 {
 			var latestInv models.Invoice
 			if err := h.db.Where("customer_id = ? AND approval_status != 'REJECTED'", customer.ID).
-				Order("id DESC").First(&latestInv).Error; err == nil && latestInv.RemainingAmount > 0 {
-				amountDue = latestInv.RemainingAmount
+				Order("id DESC").First(&latestInv).Error; err == nil {
+				if latestInv.ApprovalStatus == "PENDING" && latestInv.Consumption == 0 && (latestInv.CurrentReading == 0 || latestInv.CurrentReading <= latestInv.PreviousReading) {
+					if latestInv.Arrears > 0 {
+						amountDue = latestInv.Arrears
+					} else {
+						amountDue = 0
+					}
+				} else if latestInv.RemainingAmount > 0 {
+					amountDue = latestInv.RemainingAmount
+				}
 			}
 		}
+	}
+
+	if amountDue <= 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"message": "لا توجد مديونية متأخرة على المشترك لإرسال إنذار فصل",
+		})
 	}
 
 	msgText := fmt.Sprintf(
@@ -1203,10 +1218,22 @@ func (h *Handlers) SendBulkWarningsWhatsApp(c *fiber.Ctx) error {
 			if amountDue <= 0 {
 				var latestInv models.Invoice
 				if err := h.db.Where("customer_id = ? AND approval_status != 'REJECTED'", customer.ID).
-					Order("id DESC").First(&latestInv).Error; err == nil && latestInv.RemainingAmount > 0 {
-					amountDue = latestInv.RemainingAmount
+					Order("id DESC").First(&latestInv).Error; err == nil {
+					if latestInv.ApprovalStatus == "PENDING" && latestInv.Consumption == 0 && (latestInv.CurrentReading == 0 || latestInv.CurrentReading <= latestInv.PreviousReading) {
+						if latestInv.Arrears > 0 {
+							amountDue = latestInv.Arrears
+						} else {
+							amountDue = 0
+						}
+					} else if latestInv.RemainingAmount > 0 {
+						amountDue = latestInv.RemainingAmount
+					}
 				}
 			}
+		}
+
+		if amountDue <= 0 {
+			continue
 		}
 
 		msgText := fmt.Sprintf(
@@ -1359,11 +1386,17 @@ func (h *Handlers) GetDashboardSummary(c *fiber.Ctx) error {
 	if totalArrears == 0 {
 		h.db.Raw(`
 			SELECT COALESCE(SUM(latest_due), 0) FROM (
-				SELECT DISTINCT ON (customer_id) remaining_amount as latest_due
+				SELECT DISTINCT ON (customer_id) 
+					CASE 
+						WHEN approval_status = 'PENDING' AND consumption = 0 AND (current_reading = 0 OR current_reading <= previous_reading)
+						THEN COALESCE(arrears, 0)
+						ELSE remaining_amount
+					END as latest_due
 				FROM invoices
-				WHERE approval_status != 'REJECTED' AND remaining_amount > 0
+				WHERE approval_status != 'REJECTED'
 				ORDER BY customer_id, id DESC
 			) sub
+			WHERE latest_due > 0
 		`).Scan(&totalArrears)
 	}
 

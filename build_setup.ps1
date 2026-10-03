@@ -100,9 +100,14 @@ Write-Host "[4/4] Compiling Inno Setup Standalone Installer..." -ForegroundColor
 Push-Location $RootDir
 try {
     $issFile = Join-Path $RootDir "SmartPower_Go_Setup.iss"
-    & $IsccPath $issFile
+    $buildLog = Join-Path $RootDir "build_inno.log"
+    & $IsccPath /Q $issFile *> $buildLog
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Inno Setup compilation failed with code $LASTEXITCODE"
+        Write-Host "--- Last 20 lines of build log ---" -ForegroundColor Red
+        Get-Content $buildLog -Tail 20
+    } else {
+        Write-Host "  Inno Setup compiled successfully (log: build_inno.log)" -ForegroundColor Green
     }
 } finally {
     Pop-Location
@@ -112,22 +117,24 @@ $setupExe = Join-Path $RootDir "Setup.exe"
 if (Test-Path $setupExe) {
     $sizeMB = [math]::Round((Get-Item $setupExe).Length / 1MB, 2)
     
-    # Copy to target distribution names and folders
-    $v100Exe = Join-Path $RootDir "SmartPowerERP_Setup_v1.0.0.exe"
-    Copy-Item -Path $setupExe -Destination $v100Exe -Force
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $uniqueExeName = "SmartPowerERP_Setup_$timestamp.exe"
+    $uniqueExePath = Join-Path $RootDir $uniqueExeName
     
-    $bundleDirs = Get-ChildItem -Path $RootDir -Directory | Where-Object { $_.Name -match "[^\x00-\x7F]" -or $_.Name -like "*Final*" -or $_.Name -like "*Bundle*" }
-    foreach ($bDir in $bundleDirs) {
-        $finalExe = Join-Path $bDir.FullName "SmartPowerERP_Setup.exe"
-        Copy-Item -Path $setupExe -Destination $finalExe -Force
-        Write-Host "Synchronized to: $finalExe" -ForegroundColor Green
+    # Rename/Copy to a unique distribution name
+    Copy-Item -Path $setupExe -Destination $uniqueExePath -Force
+    
+    $pkgSetup = Join-Path $RootDir "SmartPower_Setup_Package\SmartPowerERP_Setup.exe"
+    if (Test-Path (Join-Path $RootDir "SmartPower_Setup_Package")) {
+        Copy-Item -Path $setupExe -Destination $pkgSetup -Force
+        Write-Host "Synchronized to: $pkgSetup" -ForegroundColor Green
     }
 
     Write-Host ""
     Write-Host "==========================================================" -ForegroundColor Green
     Write-Host "SUCCESS: Setup.exe built and synchronized successfully!" -ForegroundColor Green
-    Write-Host "Path: $setupExe" -ForegroundColor Green
-    Write-Host "Versioned: $v100Exe" -ForegroundColor Green
+    Write-Host "Base Path: $setupExe" -ForegroundColor Green
+    Write-Host "Unique Versioned: $uniqueExePath" -ForegroundColor Green
     Write-Host "Size: $sizeMB MB" -ForegroundColor Green
     Write-Host "==========================================================" -ForegroundColor Green
 } else {

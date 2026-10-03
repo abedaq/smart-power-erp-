@@ -35,7 +35,7 @@ export const CyclePrintView: React.FC<CyclePrintViewProps> = ({
 o في حالة تأخر السداد سيتم فصل التيار دون إشعار مسبق ولن يعاد الا بغرامة.
 o في حال قيام المشترك بتوصيل التيار لشخص آخر سيتم تغريم المشترك مبلغ وقدره 200000 مائتان ألف ريال
 o يتحمل المشترك مديونية أي موظف إن لم يكن هناك سند رسمي مختوم بختم المحطة.
-o سعر الكيلوواط/ ساعة 1400 ريال ويرتفع سعر الكيلو بنسبة وتناسب بارتفاع الديزل.`;
+o سعر الكيلوواط/ ساعة 1500 ريال ويرتفع سعر الكيلو بنسبة وتناسب بارتفاع الديزل.`;
 
   const policyLines = policyText.split('\n').filter((l: string) => l.trim().length > 0);
 
@@ -365,7 +365,7 @@ o سعر الكيلوواط/ ساعة 1400 ريال ويرتفع سعر الكي
                                     <td className="border border-black py-1 font-mono">{Number(inv.current_reading || 0) > 0 ? Number(inv.current_reading).toLocaleString('en-US') : ''}</td>
                                     <td className="border border-black py-1 font-mono">{Number(inv.consumption || 0) > 0 ? Number(inv.consumption).toLocaleString('en-US') : ''}</td>
                                     <td className="border border-black py-1 font-mono">{Number(inv.fixed_fee_snapshot || 0) > 0 ? Number(inv.fixed_fee_snapshot).toLocaleString('en-US') : ''}</td>
-                                    <td className="border border-black py-1 font-mono">{Number((inv as any).consumption_value || (inv as any).consumption_cost || (Number(inv.consumption || 0) * Number(inv.kwh_price_snapshot || 1400)) || 0) > 0 ? Number((inv as any).consumption_value || (inv as any).consumption_cost || (Number(inv.consumption || 0) * Number(inv.kwh_price_snapshot || 1400)) || 0).toLocaleString('en-US') : ''}</td>
+                                    <td className="border border-black py-1 font-mono">{Number((inv as any).consumption_value || (inv as any).consumption_cost || (Number(inv.consumption || 0) * Number(inv.kwh_price_snapshot || 1500)) || 0) > 0 ? Number((inv as any).consumption_value || (inv as any).consumption_cost || (Number(inv.consumption || 0) * Number(inv.kwh_price_snapshot || 1500)) || 0).toLocaleString('en-US') : ''}</td>
                                     <td className="border border-black py-1 font-mono">{Number(inv.arrears || 0) > 0 ? Number(inv.arrears).toLocaleString('en-US') : ''}</td>
                                     <td className="border border-black py-1 font-mono">{Number(inv.total_due || 0) > 0 ? Number(inv.total_due).toLocaleString('en-US') : ''}</td>
                                   </tr>

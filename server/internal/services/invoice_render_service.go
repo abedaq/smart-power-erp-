@@ -378,7 +378,7 @@ func (s *InvoiceRenderService) generateInvoiceHTML(inv *models.Invoice, set *mod
 		} else if set.DefaultKwhPrice > 0 {
 			kwhPrice = set.DefaultKwhPrice
 		} else {
-			kwhPrice = 1400
+			kwhPrice = 1500
 		}
 	}
 
@@ -682,9 +682,25 @@ func (s *InvoiceRenderService) RenderPaymentReceiptPNG(paymentID int64) ([]byte,
 	}
 
 	var remainingBalance float64
-	s.db.Model(&models.Invoice{}).
-		Where("customer_id = ? AND status IN ('Unpaid', 'Partially_Paid')", payment.CustomerID).
-		Select("COALESCE(SUM(remaining_amount), 0)").Scan(&remainingBalance)
+	if invoice.ID > 0 {
+		remainingBalance = invoice.RemainingAmount
+	} else if payment.CustomerID != nil {
+		var latestInv models.Invoice
+		if err := s.db.Where("customer_id = ? AND approval_status != 'REJECTED'", *payment.CustomerID).
+			Order("id DESC").First(&latestInv).Error; err == nil {
+			if latestInv.ApprovalStatus == "PENDING" && latestInv.Consumption == 0 && (latestInv.CurrentReading == 0 || latestInv.CurrentReading <= latestInv.PreviousReading) {
+				if latestInv.Arrears > 0 {
+					remainingBalance = latestInv.Arrears
+				} else {
+					remainingBalance = 0
+				}
+			} else if latestInv.RemainingAmount > 0 {
+				remainingBalance = latestInv.RemainingAmount
+			} else {
+				remainingBalance = 0
+			}
+		}
+	}
 
 	htmlContent := s.generateReceiptHTML(&payment, &invoice, &settings, remainingBalance)
 	return s.renderHTMLToPNG(htmlContent, "#receipt-card")
@@ -755,7 +771,7 @@ func (s *InvoiceRenderService) generateReceiptHTML(payment *models.Payment, inv 
 	consumptionVal := 0.0
 	arrears := 0.0
 	totalDue := 0.0
-	kwhPrice := 1400.0
+	kwhPrice := 1500.0
 
 	if inv != nil && inv.ID > 0 {
 		prevReading = inv.PreviousReading
@@ -769,7 +785,7 @@ func (s *InvoiceRenderService) generateReceiptHTML(payment *models.Payment, inv 
 			} else if set.DefaultKwhPrice > 0 {
 				kwhPrice = set.DefaultKwhPrice
 			} else {
-				kwhPrice = 1400
+				kwhPrice = 1500
 			}
 		}
 		consumptionVal = inv.ConsumptionValue
@@ -790,19 +806,23 @@ func (s *InvoiceRenderService) generateReceiptHTML(payment *models.Payment, inv 
 	// Financial invariant: calculate remaining balance accurately
 	var remaining float64
 	if inv != nil && inv.ID > 0 {
-		if payment.AmountPaid >= totalDue && remainingBalance <= 0 {
+		if inv.RemainingAmount <= 0 {
+			if inv.PaidAmount > totalDue {
+				remaining = -math.Round((inv.PaidAmount-totalDue)*100) / 100
+			} else if remainingBalance < 0 {
+				remaining = remainingBalance
+			} else {
+				remaining = 0
+			}
+		} else if payment.AmountPaid >= totalDue && len(payment.Allocations) <= 1 {
 			overpaid := math.Round((payment.AmountPaid-totalDue)*100) / 100
 			if overpaid > 0 {
 				remaining = -overpaid
 			} else {
 				remaining = 0
 			}
-		} else if inv.RemainingAmount == 0 && payment.AmountPaid > 0 && remainingBalance == 0 {
-			remaining = 0
-		} else if remainingBalance > 0 {
-			remaining = remainingBalance
 		} else {
-			remaining = math.Round((totalDue-payment.AmountPaid)*100) / 100
+			remaining = inv.RemainingAmount
 		}
 	} else {
 		remaining = remainingBalance

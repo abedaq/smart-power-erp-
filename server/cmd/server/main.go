@@ -309,12 +309,17 @@ func main() {
 	// 0. Single-Instance Mutex Check (Local User Session Scope)
 	mutexHandle, err := acquireSingleInstanceMutex()
 	if err != nil && err.Error() == "ALREADY_RUNNING" {
-		log.Println("⚠️ Another instance of SmartPower ERP is already running. Focusing window and exiting...")
-		focusExistingWindow()
-		showInfoMessageBox(
-			"SmartPower ERP",
-			"برنامج SmartPower ERP يعمل بالفعل في شريط المهام أو عبر نافذة أخرى.\n\nلا يمكن فتح أكثر من نسخة في نفس الوقت لتجنب تضارب البيانات.",
-		)
+		log.Println("⚠️ Another instance of SmartPower ERP is already running. Opening UI client...")
+		
+		cfg := config.LoadConfig()
+		cleanPort := cfg.Port
+		if cleanPort == "" {
+			cleanPort = "3000"
+		}
+		targetURL := fmt.Sprintf("http://127.0.0.1:%s", cleanPort)
+		
+		openNativeWindow(targetURL, nil)
+
 		if mutexHandle != 0 {
 			procCloseHandle.Call(mutexHandle)
 		}
@@ -402,8 +407,10 @@ func main() {
 		log.Printf("⚠️ Warning initializing WhatsApp Service: %v", err)
 	} else {
 		whatsappService.SetEventHub(eventHub)
-		whatsappService.Start()
-		log.Println("📱 Initialized and started WhatsApp Web Service Engine")
+		SafeGo("WhatsAppStartup", func() {
+			whatsappService.Start()
+		})
+		log.Println("📱 Initialized and started WhatsApp Web Service Engine in background")
 	}
 
 	// 4.1 Initialize and start Live Cloud Sync Engine
@@ -800,10 +807,37 @@ func main() {
 		}
 	})
 
-	// 10. Auto-open native webview window on start
+	cleanPort := strings.TrimPrefix(cfg.Port, ":")
+	targetURL := fmt.Sprintf("http://127.0.0.1:%s", cleanPort)
+
+	// 10. Auto-open native webview window on start after verifying backend readiness
 	SafeGo("NativeWindowLauncher", func() {
-		time.Sleep(800 * time.Millisecond)
-		openNativeWindow(fmt.Sprintf("http://localhost:%s", cfg.Port), doShutdown)
+		client := &http.Client{Timeout: 500 * time.Millisecond}
+		serverReady := false
+		for i := 0; i < 75; i++ { // wait up to 15 seconds (75 * 200ms)
+			time.Sleep(200 * time.Millisecond)
+			resp, err := client.Get(targetURL + "/api/license/status")
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					serverReady = true
+					break
+				}
+			}
+		}
+		if !serverReady {
+			log.Printf("⚠️ Server readiness probe timed out after 15s. Launching UI window anyway at: %s", targetURL)
+		} else {
+			log.Printf("✅ Backend server is verified healthy and responsive on: %s", targetURL)
+		}
+		if os.Getenv("SERVER_ONLY") == "1" || os.Getenv("BROWSER_MODE") == "1" {
+			log.Printf("🌐 Browser mode active: opened %s in default browser", targetURL)
+			rCmd := exec.Command("rundll32", "url.dll,FileProtocolHandler", targetURL)
+			rCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+			_ = rCmd.Start()
+			return
+		}
+		openNativeWindow(targetURL, doShutdown)
 	})
 
 	// 11. Graceful Shutdown Signal Interceptor
@@ -815,10 +849,9 @@ func main() {
 		doShutdown()
 	})
 
-	// 12. Start Server Listener (LAN & Localhost) with Resilience & Auto-Recovery
-	cleanPort := strings.TrimPrefix(cfg.Port, ":")
-	addr := fmt.Sprintf("0.0.0.0:%s", cleanPort)
-	log.Printf("🌐 Server listening on http://%s (Localhost & LAN Mobile Access)", addr)
+	// 12. Start Server Listener (LAN & Localhost) with Resilience & Auto-Recovery (Dual-Stack)
+	addr := fmt.Sprintf(":%s", cleanPort)
+	log.Printf("🌐 Server listening on http://127.0.0.1:%s and all interfaces (Dual-Stack IPv4/IPv6)", cleanPort)
 
 	var ln net.Listener
 	var listenErr error
@@ -920,9 +953,28 @@ func openNativeWindow(url string, onWindowClose func()) {
 		profileDir := filepath.Join(localAppData, "SmartPowerERP", "webview_profile")
 		_ = os.MkdirAll(profileDir, 0755)
 
-		// 1. Direct Embedded Win32 WebView2
-		// WebView2 bypassed to prevent crash on Admin mode
-		var w webview2.WebView = nil
+		// 1. Direct Embedded Win32 WebView2 with Admin-safe options
+		os.Setenv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--no-sandbox")
+		var w webview2.WebView
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("⚠️ WebView2 initialization panic caught: %v", r)
+					w = nil
+				}
+			}()
+			w = webview2.NewWithOptions(webview2.WebViewOptions{
+				Debug:     false,
+				DataPath:  profileDir,
+				AutoFocus: true,
+				WindowOptions: webview2.WindowOptions{
+					Title:  "SmartPower ERP",
+					Width:  1440,
+					Height: 900,
+					Center: true,
+				},
+			})
+		}()
 
 		if w != nil {
 			defer w.Destroy()
@@ -945,10 +997,21 @@ func openNativeWindow(url string, onWindowClose func()) {
 			edgeProfileDir := filepath.Join(localAppData, "SmartPowerERP", "edge_profile")
 			_ = os.MkdirAll(edgeProfileDir, 0755)
 
+			// Clean up any stale or orphaned browser processes locking this specific profile
+			// to prevent the newly spawned browser command from delegating and exiting immediately
+			pCmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-NonInteractive", "-Command",
+				`Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe' or Name = 'chrome.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*SmartPowerERP*edge_profile*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
+			)
+			pCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+			_ = pCmd.Run()
+			time.Sleep(300 * time.Millisecond)
+
 			cmd := exec.Command(browserPath,
 				fmt.Sprintf("--app=%s", url),
 				fmt.Sprintf("--user-data-dir=%s", edgeProfileDir),
-				"--window-size=1440,900",
+				"--start-maximized",
+				"--disable-gpu",
+				"--disable-software-rasterizer",
 				"--hide-crash-restore-bubble",
 				"--disable-background-mode",
 				"--disable-features=msStartupBoost,TranslateUI",
@@ -958,11 +1021,8 @@ func openNativeWindow(url string, onWindowClose func()) {
 			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
 			if err := cmd.Start(); err == nil {
 				log.Printf("🖥️ Launched application window via: %s (%s)", filepath.Base(browserPath), url)
-				_ = cmd.Wait()
-				log.Println("🛑 Modern browser window closed by user. Initiating backend shutdown...")
-				if onWindowClose != nil {
-					onWindowClose()
-				}
+				// External browser launched in standalone app mode.
+				// Backend engine stays permanently running to serve all incoming UI requests.
 				return
 			}
 		}

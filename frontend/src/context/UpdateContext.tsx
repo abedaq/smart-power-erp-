@@ -26,6 +26,10 @@ export const UpdateProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     try {
       const data = await checkUpdatesApi();
       setUpdateInfo(data);
+      if (data && data.error) {
+        throw new Error(data.error);
+      }
+      
       if (data && data.has_update) {
         setIsModalOpen(true);
       } else if (manual) {

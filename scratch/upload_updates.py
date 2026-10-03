@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import hashlib
 import json
 import os
@@ -41,7 +41,7 @@ def upload_file_requests(filename, filepath, content_type="application/octet-str
     del_headers = {
         "Authorization": f"Bearer {ANON_KEY}",
         "apikey": ANON_KEY,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json", "Cache-Control": "max-age=0, no-cache, no-store, must-revalidate"
     }
     requests.delete(del_url, headers=del_headers, json={"prefixes": [filename]}, timeout=15)
     
@@ -112,15 +112,15 @@ def upload_file_requests(filename, filepath, content_type="application/octet-str
                         success = True
                         break
                     else:
-                        print(f"⚠️ Chunk warning (HTTP {patch_resp.status_code}): {patch_resp.text}")
+                        print(f"âš ï¸ Chunk warning (HTTP {patch_resp.status_code}): {patch_resp.text}")
                 except Exception as ex:
-                    print(f"⚠️ Chunk exception: {ex}, retrying ({attempt+1}/5)...")
+                    print(f"âš ï¸ Chunk exception: {ex}, retrying ({attempt+1}/5)...")
             
             if not success:
                 print(f"[ERROR] Failed to upload chunk at offset {offset}")
                 return False
                 
-    print(f"🎉 [SUCCESS] File {filename} uploaded completely via TUS!")
+    print(f"ðŸŽ‰ [SUCCESS] File {filename} uploaded completely via TUS!")
     return True
 
 def upload_json_requests(filename, data_dict):
@@ -129,7 +129,7 @@ def upload_json_requests(filename, data_dict):
         "Authorization": f"Bearer {ANON_KEY}",
         "apikey": ANON_KEY,
         "x-upsert": "true",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json", "Cache-Control": "max-age=0, no-cache, no-store, must-revalidate"
     }
     resp = requests.post(url, headers=headers, json=data_dict, timeout=30)
     if resp.status_code not in (200, 201):
@@ -142,7 +142,7 @@ def main():
     parser = argparse.ArgumentParser(description="Upload updates to Supabase Storage")
     parser.add_argument("--manifest-only", action="store_true", help="Upload only version.json manifest")
     parser.add_argument("--version", default="3.4.3.5", help="Target release version string")
-    parser.add_argument("--changelog", default="⚡ تحديث التحصين المعماري v3.4.3.5: عزل سجلات المحرك بالكامل، تسريع الإقلاع، وحماية الاستبدال الذري وتحديثات الواجهة التلقائية.", help="Changelog text")
+    parser.add_argument("--changelog", default="âš¡ ØªØ­Ø¯ÙŠØ« Ø§Ù„ØªØ­ØµÙŠÙ† Ø§Ù„Ù…Ø¹Ù…Ø§Ø±ÙŠ v3.4.3.5: Ø¹Ø²Ù„ Ø³Ø¬Ù„Ø§Øª Ø§Ù„Ù…Ø­Ø±Ùƒ Ø¨Ø§Ù„ÙƒØ§Ù…Ù„ØŒ ØªØ³Ø±ÙŠØ¹ Ø§Ù„Ø¥Ù‚Ù„Ø§Ø¹ØŒ ÙˆØ­Ù…Ø§ÙŠØ© Ø§Ù„Ø§Ø³ØªØ¨Ø¯Ø§Ù„ Ø§Ù„Ø°Ø±ÙŠ ÙˆØªØ­Ø¯ÙŠØ«Ø§Øª Ø§Ù„ÙˆØ§Ø¬Ù‡Ø© Ø§Ù„ØªÙ„Ù‚Ø§Ø¦ÙŠØ©.", help="Changelog text")
     parser.add_argument("--target-license", default="", help="Comma-separated target license keys for canary/patch update")
     parser.add_argument("--target-hwid", default="", help="Comma-separated target HWIDs for canary/patch update")
     args = parser.parse_args()
@@ -179,10 +179,10 @@ def main():
 
     if target_licenses:
         manifest["target_licenses"] = target_licenses
-        print(f"🎯 [CANARY] Targeted Release for Licenses: {target_licenses}")
+        print(f"ðŸŽ¯ [CANARY] Targeted Release for Licenses: {target_licenses}")
     if target_hwids:
         manifest["target_hwids"] = target_hwids
-        print(f"🎯 [CANARY] Targeted Release for HWIDs: {target_hwids}")
+        print(f"ðŸŽ¯ [CANARY] Targeted Release for HWIDs: {target_hwids}")
     
     print(f"[INFO] Uploading version.json (v{args.version})...")
     if not upload_json_requests("version.json", manifest):
@@ -193,3 +193,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

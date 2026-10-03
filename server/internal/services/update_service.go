@@ -346,104 +346,145 @@ func (s *UpdateService) DownloadUpdate(ctx context.Context, downloadURL string, 
 	destPath := filepath.Join(tempDir, "SmartPowerERP_new.exe")
 	_ = os.Remove(destPath)
 
-	req, err := http.NewRequestWithContext(downloadCtx, "GET", downloadURL, nil)
-	if err != nil {
-		s.recordError(fmt.Sprintf("failed to prepare download request: %v", err))
-		return "", err
-	}
-	req.Header.Set("User-Agent", fmt.Sprintf("SmartPowerERP/%s", s.GetCurrentVersion()))
-
 	downloadTransport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
-			Timeout:   15 * time.Second,
+			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          10,
 		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   15 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
+		TLSHandshakeTimeout:   30 * time.Second,
+		ResponseHeaderTimeout: 90 * time.Second,
+		ExpectContinueTimeout: 2 * time.Second,
 	}
 	downloadClient := &http.Client{
 		Timeout:   0, // Unlimited duration for large binary downloads
 		Transport: downloadTransport,
 	}
 
-	resp, err := downloadClient.Do(req)
-	if err != nil {
-		s.recordError(fmt.Sprintf("download request failed: %v", err))
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		err := fmt.Errorf("download server returned HTTP %d", resp.StatusCode)
-		s.recordError(err.Error())
-		return "", err
-	}
-
-	totalBytes := resp.ContentLength
-	s.mu.Lock()
-	s.progress.TotalBytes = totalBytes
-	s.mu.Unlock()
-
-	out, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
-	if err != nil {
-		s.recordError(fmt.Sprintf("failed to create file at %s: %v", destPath, err))
-		return "", err
-	}
-	defer out.Close()
-
-	hasher := sha256.New()
-	buf := make([]byte, 64*1024)
 	var downloaded int64
-	lastEmitTime := time.Now()
+	var totalBytes int64
+	var hasher = sha256.New()
+	maxRetries := 3
+	var lastDownloadErr error
 
-	for {
+	for attempt := 1; attempt <= maxRetries; attempt++ {
 		select {
 		case <-downloadCtx.Done():
-			s.recordError("download cancelled")
-			_ = out.Close()
+			s.recordError("تم إلغاء التحميل")
 			_ = os.Remove(destPath)
 			return "", downloadCtx.Err()
 		default:
 		}
 
-		n, rErr := resp.Body.Read(buf)
-		if n > 0 {
-			if _, wErr := out.Write(buf[:n]); wErr != nil {
-				s.recordError(fmt.Sprintf("failed to write data: %v", wErr))
-				return "", wErr
-			}
-			hasher.Write(buf[:n])
-			downloaded += int64(n)
+		if attempt > 1 {
+			log.Printf("🔄 [UpdateService] Retrying download (attempt %d/%d)...", attempt, maxRetries)
+			time.Sleep(time.Duration(attempt) * 1500 * time.Millisecond)
+		}
 
-			s.mu.Lock()
-			s.progress.BytesReceived = downloaded
-			if totalBytes > 0 {
-				s.progress.Progress = float64(downloaded) / float64(totalBytes) * 100
-			}
-			s.mu.Unlock()
+		req, err := http.NewRequestWithContext(downloadCtx, "GET", downloadURL, nil)
+		if err != nil {
+			lastDownloadErr = fmt.Errorf("failed to prepare download request: %w", err)
+			continue
+		}
+		req.Header.Set("User-Agent", fmt.Sprintf("SmartPowerERP/%s", s.GetCurrentVersion()))
+		req.Header.Set("Cache-Control", "no-cache")
 
-			if time.Since(lastEmitTime) > 300*time.Millisecond {
-				s.emitProgressEvent()
-				lastEmitTime = time.Now()
+		resp, err := downloadClient.Do(req)
+		if err != nil {
+			lastDownloadErr = fmt.Errorf("تعذر الاتصال بخادم التحديث: %w", err)
+			s.recordError(lastDownloadErr.Error())
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			lastDownloadErr = fmt.Errorf("خادم التحديث استجاب برمز %d", resp.StatusCode)
+			s.recordError(lastDownloadErr.Error())
+			continue
+		}
+
+		totalBytes = resp.ContentLength
+		s.mu.Lock()
+		s.progress.TotalBytes = totalBytes
+		s.mu.Unlock()
+
+		out, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+		if err != nil {
+			_ = resp.Body.Close()
+			lastDownloadErr = fmt.Errorf("فشل إنشاء ملف التحديث المؤقت: %w", err)
+			s.recordError(lastDownloadErr.Error())
+			continue
+		}
+
+		hasher.Reset()
+		downloaded = 0
+		buf := make([]byte, 64*1024)
+		lastEmitTime := time.Now()
+		streamSuccess := true
+
+		for {
+			select {
+			case <-downloadCtx.Done():
+				s.recordError("تم إلغاء التحميل")
+				_ = out.Close()
+				_ = resp.Body.Close()
+				_ = os.Remove(destPath)
+				return "", downloadCtx.Err()
+			default:
+			}
+
+			n, rErr := resp.Body.Read(buf)
+			if n > 0 {
+				if _, wErr := out.Write(buf[:n]); wErr != nil {
+					s.recordError(fmt.Sprintf("failed to write data: %v", wErr))
+					streamSuccess = false
+					break
+				}
+				hasher.Write(buf[:n])
+				downloaded += int64(n)
+
+				s.mu.Lock()
+				s.progress.BytesReceived = downloaded
+				if totalBytes > 0 {
+					s.progress.Progress = float64(downloaded) / float64(totalBytes) * 100
+				}
+				s.mu.Unlock()
+
+				if time.Since(lastEmitTime) > 250*time.Millisecond {
+					s.emitProgressEvent()
+					lastEmitTime = time.Now()
+				}
+			}
+
+			if rErr != nil {
+				if rErr == io.EOF {
+					break
+				}
+				log.Printf("⚠️ [UpdateService] Stream read error: %v", rErr)
+				streamSuccess = false
+				break
 			}
 		}
 
-		if rErr != nil {
-			if rErr == io.EOF {
-				break
-			}
-			s.recordError(fmt.Sprintf("error reading download stream: %v", rErr))
-			return "", rErr
+		_ = out.Close()
+		_ = resp.Body.Close()
+
+		if streamSuccess && (totalBytes <= 0 || downloaded == totalBytes) {
+			lastDownloadErr = nil
+			break
+		} else {
+			lastDownloadErr = fmt.Errorf("انقطع الاتصال أثناء التحميل (تم استلام %d من %d بايت)", downloaded, totalBytes)
+			s.recordError(lastDownloadErr.Error())
 		}
 	}
 
-	// Explicitly close file before computing final status and releasing file handle
-	_ = out.Close()
+	if lastDownloadErr != nil {
+		_ = os.Remove(destPath)
+		return "", lastDownloadErr
+	}
 
 	// Verify mandatory SHA256 integrity checksum
 	cleanExpectedSHA := strings.TrimSpace(expectedSHA256)

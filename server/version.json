@@ -1,0 +1,8 @@
+﻿{
+    "changelog":  "تحديث عاجل: إصلاح خلل سداد الفواتير المتراكمة حيث كانت المتأخرات تختفي وتتغير قيمة الفاتورة.",
+    "version":  "3.4.5.8",
+    "sha256":  "C776509C694DFFCE2CAD0A190493AFCF8C7E13DF2BDC2F5F288A0666F4BEAE60",
+    "mandatory":  true,
+    "download_url":  "https://pkuoytiickgbtfeffmxq.supabase.co/storage/v1/object/public/updates/SmartPowerERP.exe",
+    "release_date":  "2026-09-26"
+}

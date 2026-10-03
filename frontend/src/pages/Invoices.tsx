@@ -52,7 +52,7 @@ import { useDebouncedRealtime } from '../utils/debouncedRealtime';
 import { QUERY_KEYS, invalidateFinancialTree } from '../constants/queryKeys';
 
 interface ExcelSheetTabsProps {
-  cycles: Array<{ code: string; label: string; count: number }>;
+  cycles: Array<{ code: string; label: string; count: number; cycleNum?: number; monthIndex?: number; year?: number }>;
   selectedCycle: string;
   onSelectCycle: (label: string) => void;
 }
@@ -125,7 +125,10 @@ const ExcelSheetTabs: React.FC<ExcelSheetTabsProps> = ({
         {cycles.map((c) => {
           const isSelected = isSameCycle(selectedCycle, c.label);
           const isHist = isHistoricalBillingCycle(c.label, cycles);
-          const displayLabel = c.label.startsWith('شهر') ? c.label : `شهر ${c.label}`;
+          const clean = c.label.replace(/^شهر\s*/, '').trim();
+          const parts = clean.split(/\s+/);
+          const monthName = parts[0] || c.label;
+          const displayLabel = c.cycleNum ? `${monthName} (دورة ${c.cycleNum})` : (c.label.startsWith('شهر') ? c.label : `شهر ${c.label}`);
 
           return (
             <button
@@ -294,10 +297,11 @@ const Invoices: React.FC = () => {
         ];
         list = fetchedCycles.map((c: any) => {
           const label = typeof c === 'string' ? c : c.label || c.code;
+          const cleanLabel = label.replace(/^شهر\s*/, '').trim();
           let monthIndex = 1;
           let cycleNum = 1;
           let year = 2026;
-          const match = label.match(/^([\u0600-\u06FF]+)\s+([12])(?:\s*-\s*(\d{4}))?/);
+          const match = cleanLabel.match(/^([\u0600-\u06FF]+)\s+([12])(?:\s*-\s*(\d{4}))?/);
           if (match) {
             const mName = normalizeMonth(match[1]);
             const found = standardMonths.find(m => normalizeMonth(m) === mName);
@@ -305,10 +309,14 @@ const Invoices: React.FC = () => {
             cycleNum = parseInt(match[2], 10);
             if (match[3]) year = parseInt(match[3], 10);
           }
+          const actualCount = typeof c === 'object' && typeof c.count === 'number' && c.count > 0
+            ? c.count
+            : rawInvoices.filter(inv => isSameCycle(inv.billing_cycle || inv.created_at, label)).length;
+
           return {
             code: label,
             label,
-            count: typeof c === 'object' && typeof c.count === 'number' ? c.count : 0,
+            count: actualCount,
             year,
             monthIndex,
             cycleNum,
@@ -434,7 +442,7 @@ const Invoices: React.FC = () => {
     });
     return sorted.map((inv: Invoice) => {
       const planPrice = Number(
-        inv.kwh_price_snapshot || inv.customer?.subscription_plan?.kwh_price || 1400
+        inv.kwh_price_snapshot || inv.customer?.subscription_plan?.kwh_price || 1500
       );
       const planFee = Number(
         inv.fixed_fee_snapshot || inv.customer?.subscription_plan?.fixed_fee || 1000

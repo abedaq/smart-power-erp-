@@ -40,3 +40,8 @@ smartpower_license_admin/android/local.properties
 # OS files
 .DS_Store
 Thumbs.db
+
+# Agent artifacts & scratch clutter
+.agents/
+scratch/archive/
+*.pyc

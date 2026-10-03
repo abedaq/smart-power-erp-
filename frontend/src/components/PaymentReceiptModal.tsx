@@ -44,7 +44,7 @@ export const PaymentReceiptModal: React.FC<PaymentReceiptModalProps> = ({
       (customer as any)?.unit_price ??
       (customer as any)?.kwh_price ??
       customer?.subscription_plan?.kwh_price ??
-      1400
+      1500
   );
   const planFee = Number(
     (customer as any)?.serviceFee ??
@@ -61,7 +61,7 @@ o يتحمل المشترك مديونية أي موظف إن لم يكن هنا
 o سعر الكيلوواط/ ساعة ${planPrice.toLocaleString('en-US')} ريال ويرتفع سعر الكيلو بنسبة وتناسب بارتفاع الديزل.`;
 
   const policyLines = (settings?.invoice_policy_text || defaultPolicyText)
-    .replace(/1400/g, planPrice.toLocaleString('en-US'))
+    .replace(/1500/g, planPrice.toLocaleString('en-US'))
     .split('\n')
     .filter((l: string) => l.trim().length > 0);
 
@@ -326,7 +326,7 @@ o سعر الكيلوواط/ ساعة ${planPrice.toLocaleString('en-US')} ري�
                     {/* Financial Snapshot */}
                     <div className="bg-slate-100 border border-black p-1.5 text-[9px] font-black space-y-0.5">
                       <div className="flex justify-between">
-                        <span>المبلغ المسدد:</span>
+                        <span>المقبوض بهذا السند:</span>
                         <span className="font-mono text-emerald-800">
                           {paidAmountNum.toLocaleString('en-US')} ر.ي
                         </span>

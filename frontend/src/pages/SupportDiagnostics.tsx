@@ -73,28 +73,28 @@ export const SupportDiagnostics: React.FC = () => {
   return (
     <div className="space-y-6" dir="rtl">
       {/* Header Info Banner */}
-      <div className="bg-gradient-to-r from-slate-900 via-sky-950 to-slate-900 rounded-3xl p-6 sm:p-8 text-white shadow-xl relative overflow-hidden">
-        <div className="absolute top-0 right-0 w-96 h-96 bg-sky-500/10 rounded-full blur-3xl pointer-events-none" />
-        <div className="absolute bottom-0 left-0 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
+      <div className="bg-gradient-to-r from-red-950 via-rose-900 to-red-950 rounded-3xl p-6 sm:p-8 text-white shadow-xl relative overflow-hidden border border-red-700/40">
+        <div className="absolute top-0 right-0 w-96 h-96 bg-rose-500/15 rounded-full blur-3xl pointer-events-none" />
+        <div className="absolute bottom-0 left-0 w-96 h-96 bg-red-600/15 rounded-full blur-3xl pointer-events-none" />
 
         <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
           <div className="space-y-2">
-            <div className="inline-flex items-center gap-2 px-3 py-1 bg-white/10 rounded-full text-sky-300 text-xs font-bold border border-white/15">
+            <div className="inline-flex items-center gap-2 px-3 py-1 bg-white/15 rounded-full text-rose-200 text-xs font-bold border border-white/20">
               <LifeBuoy size={14} />
               <span>مركز التشخيص والدعم الفني الذكي</span>
             </div>
             <h2 className="text-2xl sm:text-3xl font-black tracking-tight">
               إرسال وتصدير تقارير فحص النظام
             </h2>
-            <p className="text-slate-300 text-xs sm:text-sm max-w-xl font-medium leading-relaxed">
+            <p className="text-rose-100/90 text-xs sm:text-sm max-w-xl font-medium leading-relaxed">
               إذا واجهت أي مشكلة أو استفسار، يمكنك بنقرة واحدة إرسال سجلات النظام المنقحة لفريق التطوير السحابي لتشخيص الخلل وتقديم الترقيع المناسب دون الحاجة لبرامج التحكم عن بعد.
             </p>
           </div>
 
           <div className="flex items-center gap-3">
-            <div className="p-4 bg-white/10 backdrop-blur-md rounded-2xl border border-white/10 text-center">
-              <FileText className="mx-auto text-sky-400 mb-1" size={24} />
-              <div className="text-xs font-bold text-slate-300">سجلات آمنة ومشفّرة</div>
+            <div className="p-4 bg-white/15 backdrop-blur-md rounded-2xl border border-white/15 text-center">
+              <FileText className="mx-auto text-rose-300 mb-1" size={24} />
+              <div className="text-xs font-bold text-white">سجلات آمنة ومشفّرة</div>
             </div>
           </div>
         </div>

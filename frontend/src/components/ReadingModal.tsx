@@ -95,7 +95,7 @@ export const ReadingModal: React.FC<ReadingModalProps> = ({ isOpen, onClose, cus
   // Tariff & Estimated Total Calculation
   const kwhPrice = activeCustomer?.subscription_plan?.kwh_price
     ? Number(activeCustomer.subscription_plan.kwh_price)
-    : (settings?.default_kwh_price ? Number(settings.default_kwh_price) : 1400);
+    : (settings?.default_kwh_price ? Number(settings.default_kwh_price) : 1500);
 
   const fixedFee = activeCustomer?.subscription_plan?.fixed_fee !== undefined
     ? Number(activeCustomer.subscription_plan.fixed_fee)

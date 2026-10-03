@@ -18,7 +18,8 @@ export function formatCycleName(dateOrCycleStr?: string | Date | null): string {
   }
 
   if (typeof dateOrCycleStr === 'string') {
-    const trimmed = dateOrCycleStr.trim();
+    let trimmed = dateOrCycleStr.trim();
+    trimmed = trimmed.replace(/^شهر\s+/, '');
     
     // Check if format is like "أغسطس- 2 - 2026" or "أغسطس 1" or "يناير 1 - 2027"
     const arabicMatch = trimmed.match(/^([\u0600-\u06FF]+)[-\s]+([12])(?:\b|[-\s]+(\d{4}))/);
@@ -163,7 +164,8 @@ export function getUniqueCyclesFromInvoices(invoices: Invoice[]): CycleOption[] 
     let cycleNum = 1;
     let year = 2026;
 
-    const match = label.match(/^([\u0600-\u06FF]+)\s+([12])(?:\s*-\s*(\d{4}))?/);
+    const cleanLabel = label.replace(/^شهر\s*/, '').trim();
+    const match = cleanLabel.match(/^([\u0600-\u06FF]+)\s+([12])(?:\s*-\s*(\d{4}))?/);
     if (match) {
       const mName = normalizeMonth(match[1]);
       const found = standardMonths.find(m => normalizeMonth(m.name) === mName);

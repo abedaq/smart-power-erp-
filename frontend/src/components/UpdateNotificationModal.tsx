@@ -17,6 +17,7 @@ import {
   applyUpdateApi 
 } from '../services/update.service';
 import { useRealtime } from '../context/RealtimeContext';
+import { useAuth } from '../context/AuthContext';
 import toast from 'react-hot-toast';
 
 interface UpdateNotificationModalProps {
@@ -39,6 +40,7 @@ export const UpdateNotificationModal: React.FC<UpdateNotificationModalProps> = (
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [isApplying, setIsApplying] = useState<boolean>(false);
   const { lastUpdateProgress } = useRealtime();
+  const { user } = useAuth();
 
   const mountedRef = useRef<boolean>(true);
   const isDownloadingRef = useRef<boolean>(false);
@@ -136,6 +138,33 @@ export const UpdateNotificationModal: React.FC<UpdateNotificationModalProps> = (
     }
   }, [isOpen, lastUpdateProgress]);
 
+  // Fallback Resilient Polling: Guarantee continuous live updates even if SSE disconnects or lags
+  useEffect(() => {
+    if (!isOpen || status !== 'downloading') return;
+    const pollInterval = setInterval(() => {
+      getUpdateStatusApi()
+        .then((res) => {
+          if (res && mountedRef.current) {
+            if (res.status) setStatus(res.status);
+            if (typeof res.progress === 'number') setProgress(res.progress);
+            if (typeof res.bytes_received === 'number') setBytesReceived(res.bytes_received);
+            if (typeof res.total_bytes === 'number') setTotalBytes(res.total_bytes);
+            if (res.status === 'ready') {
+              isDownloadingRef.current = false;
+            } else if (res.status === 'error') {
+              setErrorMessage(res.last_error || 'حدث خطأ أثناء تحميل التحديث');
+              isDownloadingRef.current = false;
+              isApplyingRef.current = false;
+              hasTriggeredApplyRef.current = false;
+            }
+          }
+        })
+        .catch(() => {});
+    }, 600);
+
+    return () => clearInterval(pollInterval);
+  }, [isOpen, status]);
+
   const handleStartDownload = useCallback(async () => {
     if (!updateInfo || isDownloadingRef.current) return;
     try {
@@ -179,7 +208,7 @@ export const UpdateNotificationModal: React.FC<UpdateNotificationModalProps> = (
     return null;
   }
 
-  const isMandatory = updateInfo.mandatory;
+  const isMandatory = updateInfo.mandatory && user?.role === 'ADMIN';
   const isBusy = status === 'downloading' || status === 'ready' || status === 'applying' || isApplying;
 
   return (
@@ -287,7 +316,7 @@ export const UpdateNotificationModal: React.FC<UpdateNotificationModalProps> = (
                   جاري تحميل حزمة التحديث بأمان...
                 </span>
                 <span className="font-mono text-blue-800 text-sm font-black">
-                  {progress.toLocaleString('en-US', { maximumFractionDigits: 0 })}%
+                  {progress.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%
                 </span>
               </div>
 

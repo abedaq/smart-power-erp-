@@ -5,7 +5,7 @@
 ; =====================================================================
 
 #define MyAppName "Smart Power ERP"
-#define MyAppVersion "3.4.5.7"
+#define MyAppVersion "4.1.1.0"
 #define MyAppPublisher "SmartPower Technologies"
 #define MyAppExeName "SmartPowerERP.exe"
 
@@ -191,8 +191,11 @@ begin
     Exec(PgCtlPath, ExpandConstant('stop -D "{localappdata}\SmartPowerERP\data" -m fast'), '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
 
-  // 2. Targeted termination strictly of the process listening on port 15432 using PowerShell with ExecutionPolicy Bypass
-  Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -NonInteractive -Command "Get-NetTCPConnection -LocalPort 15432 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // 2. Targeted termination of processes listening on ports 15432 (Postgres) and 3000 (SmartPower Web)
+  Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -NonInteractive -Command "Get-NetTCPConnection -LocalPort 15432, 3000 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  // 3. Terminate any dangling browser app instances associated with SmartPowerERP edge_profile
+  Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -NonInteractive -Command "Get-CimInstance Win32_Process -Filter ''Name = ''''msedge.exe'''' or Name = ''''chrome.exe'''''' -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like ''*edge_profile*'' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   Sleep(500);
 end;

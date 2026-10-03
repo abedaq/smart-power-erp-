@@ -47,10 +47,11 @@ export const PeriodSelector: React.FC<PeriodSelectorProps> = ({
       try {
         const res = await api.get('/readings/cycles');
         if (isMounted && res.data?.success && Array.isArray(res.data.data)) {
-          setFetchedPeriods(res.data.data);
+          const limitedData = res.data.data.slice(0, 3);
+          setFetchedPeriods(limitedData);
           // If currentPeriod not set or not in list, auto-select active cycle
-          if (!currentPeriod && res.data.data.length > 0) {
-            const current = res.data.data.find((c: BillingCycleOption) => c.is_current) || res.data.data[0];
+          if (!currentPeriod && limitedData.length > 0) {
+            const current = limitedData.find((c: BillingCycleOption) => c.is_current) || limitedData[0];
             onPeriodChange(current.cycle_name);
           }
         }
@@ -58,9 +59,8 @@ export const PeriodSelector: React.FC<PeriodSelectorProps> = ({
         console.warn('[PeriodSelector] Failed to fetch cycles from API, using fallback:', err);
         if (isMounted && fetchedPeriods.length === 0) {
           const fallback = [
-            { cycle_name: 'سبتمبر- 1 - 2026', is_current: true },
-            { cycle_name: 'أغسطس- 2 - 2026', is_current: false },
-            { cycle_name: 'أغسطس- 1 - 2026', is_current: false }
+            { cycle_name: 'سبتمبر 1', is_current: true },
+            { cycle_name: 'سبتمبر 2', is_current: false }
           ];
           setFetchedPeriods(fallback);
           if (!currentPeriod) {

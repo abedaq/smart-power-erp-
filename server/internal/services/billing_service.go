@@ -197,7 +197,7 @@ func (s *BillingService) EnsureCycleInvoices(cycle string) error {
 				arrears = cust.TotalDue
 			}
 
-			kwhPrice := 1400.0
+			kwhPrice := 1500.0
 			fixedFee := 1000.0
 			if cust.SubscriptionPlan != nil {
 				if cust.SubscriptionPlan.KwhPrice > 0 {
@@ -295,7 +295,19 @@ func (s *BillingService) ResyncCustomerInvoicesChain(customerID int64) error {
 				inv.CurrentReading = inv.PreviousReading
 			}
 		}
-		inv.Arrears = cascadeArr
+		// Invariant: Do not overwrite inv.Arrears if:
+		// 1) The invoice is already Paid or has payments (PaidAmount > 0), and inv.Arrears > 0 while cascadeArr < inv.Arrears
+		//    (because prior invoices were marked Paid specifically due to this invoice's cumulative payment/arrears absorption).
+		preserveArrears := false
+		if inv.Arrears > 0 && cascadeArr < inv.Arrears {
+			if inv.Status == "Paid" || inv.RemainingAmount <= 0 || inv.PaidAmount > 0 {
+				preserveArrears = true
+			}
+		}
+
+		if !preserveArrears {
+			inv.Arrears = cascadeArr
+		}
 
 		// Recalculate consumption & financials
 		downCons := 0.0
@@ -321,7 +333,37 @@ func (s *BillingService) ResyncCustomerInvoicesChain(customerID int64) error {
 		if inv.CurrentReading > 0 {
 			cascadePrev = inv.CurrentReading
 		}
-		cascadeArr = inv.RemainingAmount
+		// في حال وجود دورات مستقبلية فارغة أو غير معتمدة، منع ترحيل رسوم افتراضية إذا كان الرصيد السابق 0 مع الحفاظ التام على الرصيد الدائن (السالب)
+		if inv.ApprovalStatus == "PENDING" && downCons == 0 {
+			if cascadeArr < 0 {
+				cascadeArr = inv.RemainingAmount
+			} else if cascadeArr == 0 {
+				cascadeArr = 0
+			} else {
+				cascadeArr = inv.RemainingAmount
+			}
+		} else {
+			cascadeArr = inv.RemainingAmount
+		}
+	}
+
+	// Credit Depletion Pass:
+	// If any prior invoice holds a negative balance (credit surplus), consume it against downstream positive consumption charges.
+	for i := 0; i < len(invoices); i++ {
+		if invoices[i].RemainingAmount < 0 {
+			creditAvailable := math.Abs(invoices[i].RemainingAmount)
+			for j := i + 1; j < len(invoices) && creditAvailable > 0; j++ {
+				charges := invoices[j].TotalAmount
+				absorbed := math.Min(creditAvailable, charges)
+				invoices[i].RemainingAmount = math.Round((invoices[i].RemainingAmount+absorbed)*100) / 100
+				creditAvailable -= absorbed
+			}
+			if invoices[i].RemainingAmount >= 0 {
+				invoices[i].RemainingAmount = 0
+				invoices[i].Status = "Paid"
+			}
+			_ = s.db.Save(&invoices[i])
+		}
 	}
 
 	return nil
@@ -422,6 +464,10 @@ func (s *BillingService) GetBillingCycles() ([]string, error) {
 	sort.Slice(cycles, func(i, j int) bool {
 		return GetCycleSortIndex(cycles[i]) > GetCycleSortIndex(cycles[j])
 	})
+
+	if len(cycles) > 3 {
+		cycles = cycles[:3]
+	}
 
 	return cycles, nil
 }
@@ -671,6 +717,11 @@ func (s *BillingService) GenerateNextCycle(fromCycle string) (string, int, error
 			totalDue := math.Round((fee+arrears)*100) / 100
 			remainingAmount := totalDue
 
+			newStatus := "Unpaid"
+			if remainingAmount <= 0 {
+				newStatus = "Paid"
+			}
+
 			invNum := fmt.Sprintf("INV-%s-%s", strings.ReplaceAll(targetCycle, " ", "-"), cust.SubscriberNumber)
 
 			custID := cust.ID
@@ -695,7 +746,7 @@ func (s *BillingService) GenerateNextCycle(fromCycle string) (string, int, error
 				RemainingAmount:  remainingAmount,
 				DueDate:          dueDate,
 				ApprovalStatus:   "PENDING",
-				Status:           "Unpaid",
+				Status:           newStatus,
 				CreatedAt:        &now,
 				UpdatedAt:        &now,
 			}
